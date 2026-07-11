@@ -1,0 +1,152 @@
+[project]
+name = "personal-finance"
+version = "0.1.0"
+description = "Personal finance and budget management app, using data pipelining, machine learning, AI, and data visualization to make where money is going immediately intuitive."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Alex McIntosh", email = "mcintalmo@gmail.com" }]
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/mcintalmo/personal-finance"
+Repository = "https://github.com/mcintalmo/personal-finance.git"
+Issues = "https://github.com/mcintalmo/personal-finance/issues"
+
+# ── Build backend ───────────────────────────────────────────
+# hatchling works for both apps and publishable libraries.
+# For a pure app (never published to PyPI), you can remove [build-system].
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/personal_finance"]
+
+# ── Dependencies ────────────────────────────────────────────
+# PEP 735 dependency groups — uv natively supports these.
+# Install: uv sync  (installs project + dev group)
+# Add a dep: uv add <package>
+# Add a dev dep: uv add --group dev <package>
+[dependency-groups]
+dev = [
+    "ruff>=0.15",
+    "ty>=0.0.1a0",           # Astral type checker — in beta, fast, modern
+    "pytest>=8.3",
+    "pytest-cov>=7.0",
+    "pre-commit>=4.0",
+]
+
+# ── uv ──────────────────────────────────────────────────────
+[tool.uv]
+package = true   # treat as an installable package (src layout)
+
+# ── Ruff ────────────────────────────────────────────────────
+# Replaces: black, isort, flake8, pyupgrade, and most plugins.
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (undefined names, unused imports, etc.)
+    "I",    # isort (import ordering)
+    "UP",   # pyupgrade (modernise syntax to target Python version)
+    "B",    # flake8-bugbear (likely bugs and design issues)
+    "C4",   # flake8-comprehensions (unnecessary comprehensions)
+    "SIM",  # flake8-simplify (simplifiable code patterns)
+    "PTH",  # flake8-use-pathlib (prefer pathlib over os.path)
+    "N",    # pep8-naming conventions
+    "RUF",  # ruff-specific rules
+    "TCH",  # flake8-type-checking (TYPE_CHECKING imports)
+    "ANN",  # flake8-annotations (enforce type hints)
+    "PYI",  # flake8-pyi (type stub files)
+]
+ignore = [
+    "E501",    # line too long — handled by the formatter
+    "ANN101",  # missing type annotation for `self`
+    "ANN102",  # missing type annotation for `cls`
+    "ANN401",  # dynamically typed `Any` — sometimes necessary
+    "B008",    # function calls in default args — fine for FastAPI/typer
+    "SIM108",  # ternary operator — explicit if/else is sometimes clearer
+]
+preview = true  # enable new rules in preview mode (ruff v0.15+)
+
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "ANN",     # type hints not required in tests
+    "S101",    # allow assert statements in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["personal_finance"]
+split-on-trailing-comma = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+docstring-code-format = true
+
+# ── ty (type checker) ───────────────────────────────────────
+# ty is Astral's type checker — extremely fast, same team as uv/ruff.
+# Status: beta (1.0 targeted 2026). No plugin system yet.
+# If you need mypy plugins (Django, SQLAlchemy, Pydantic v1), use pyright instead.
+# Docs: https://docs.astral.sh/ty/
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.rules]
+# Severity levels: "error" | "warn" | "ignore"
+unresolved-import = "error"
+unused-ignore-comment = "warn"
+missing-type-argument = "error"
+possibly-unresolved-reference = "warn"
+
+# Loosen rules for generated or legacy code:
+# [[tool.ty.overrides]]
+# include = ["src/personal_finance/generated/**"]
+# rules = { unresolved-import = "ignore" }
+
+# ── pytest ──────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]       # makes `from personal_finance import ...` work in tests
+addopts = [
+    "--cov=personal_finance",
+    "--cov-report=term-missing",
+    "--cov-report=html:htmlcov",
+    "--cov-report=xml:coverage.xml",
+    "-v",
+    "--tb=short",
+]
+filterwarnings = [
+    "error",               # treat warnings as errors (remove if too strict)
+    "ignore::DeprecationWarning:pkg_resources",
+]
+
+# ── coverage ────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["src/personal_finance"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+]
+fail_under = 80

@@ -1,0 +1,98 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+# Only run one deployment at a time.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false   # don't cancel in-flight deploys
+
+jobs:
+  # ── Gate: require CI to pass first ───────────────────────
+  # This waits for the ci.yml workflow to succeed on the same commit.
+  # If CI is not running (e.g. workflow skipped), this will also succeed —
+  # so make sure branch protection requires CI to pass before merge.
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only deploy from pushes to main (not PRs targeting main).
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+    # Optional: target a named GitHub Environment for environment-scoped secrets
+    # and deployment protection rules. Create the environment in:
+    #   Settings → Environments → New environment → "production"
+    environment:
+      name: production
+      # url: https://your-app.example.com   # ← fill in your app URL
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies (production only)
+        run: uv sync --no-group dev
+
+      # ── Build (if applicable) ─────────────────────────────
+      # Uncomment and adapt the block that matches your project type.
+
+      # Web app / API — build a Docker image and push to a registry:
+      # - name: Build and push Docker image
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: .
+      #     push: true
+      #     tags: ghcr.io/mcintalmo/personal-finance:latest
+      #   env:
+      #     REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Python library — publish to PyPI:
+      # - name: Build distribution
+      #   run: uv build
+      # - name: Publish to PyPI
+      #   run: uv publish
+      #   env:
+      #     UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+
+      # Data pipeline — trigger a remote run:
+      # - name: Trigger pipeline
+      #   run: |
+      #     curl -X POST https://your-orchestrator/api/runs \
+      #       -H "Authorization: Bearer ${{ secrets.PIPELINE_TOKEN }}" \
+      #       -d '{"pipeline": "personal_finance", "commit": "${{ github.sha }}"}'
+
+      # ── Deploy ────────────────────────────────────────────
+      # Replace this placeholder with your actual deployment command.
+      - name: Deploy
+        run: |
+          echo "TODO: add your deploy command here."
+          echo "Deploying commit: ${{ github.sha }}"
+          # Examples:
+          #   Railway:   railway up --service personal-finance
+          #   Fly.io:    fly deploy --remote-only
+          #   AWS ECS:   aws ecs update-service --service personal-finance --force-new-deployment
+          #   Terraform: cd infra/terraform && terraform apply -auto-approve
+        env:
+          # Add environment-specific secrets here.
+          # Create them in: Settings → Secrets → Actions → New repository secret
+          # DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          # DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENVIRONMENT: production
+
+      # ── Notify ────────────────────────────────────────────
+      - name: Notify on failure
+        if: ${{ failure() }}
+        run: |
+          echo "Deployment failed for commit ${{ github.sha }}."
+          # Add a Slack/Teams/PagerDuty notification here if desired.
