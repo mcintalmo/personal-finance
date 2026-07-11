@@ -67,6 +67,8 @@ Two MCP servers are configured in `.mcp.json` and available to all AI agents wor
 |--------|----------|---------|
 | `github` | PR management, issues, code search, Actions runs, Dependabot alerts | `GITHUB_TOKEN` env var |
 | `fetch` | Fetch any URL — docs, Stack Overflow, RFCs — as clean text | Nothing |
+| `context7` | Version-current library docs (dbt, dlt, DuckDB, Streamlit, Plotly, Ollama, ...). **Use before writing code against any framework API — do not rely on training data.** | Nothing |
+| `deepwiki` | Q&A over public GitHub repos — e.g. ask how Firefly III or Actual Budget model transactions/transfers before designing ours | Nothing |
 
 Set `GITHUB_TOKEN` in your shell or `.env.local`. A fine-grained PAT scoped to this repo is sufficient; no `repo:admin` scope needed for day-to-day use.
 

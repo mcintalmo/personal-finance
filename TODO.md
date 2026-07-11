@@ -7,8 +7,7 @@
 
 ## Phase 1 — Foundation
 
-- [ ] ⏳ IN PROGRESS — Define core schema (accounts, transactions, transaction_splits, categories, merchants, documents, links, budgets, labels) as Pydantic models + DDL
-- [ ] YAML configuration system: Pydantic-validated config loaders for sources, taxonomy, rules, budgets
+- [ ] ⏳ IN PROGRESS — YAML configuration system: Pydantic-validated config loaders for sources, taxonomy, rules, budgets
 - [ ] Seed hierarchical category taxonomy from YAML (arbitrary depth, e.g. apples → groceries → essentials)
 - [ ] Dummy-data generator `personal_finance.synth`: realistic CSV/OFX bank + credit card exports
 - [ ] Dummy-data generator: fake receipt images/JSON matching real receipt structure
@@ -22,4 +21,4 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
-_(nothing yet)_
+- [x] Define core schema (accounts, transactions, transaction_splits, categories, merchants, documents, links, budgets, labels) as Pydantic models + DDL — `models.py`, `ddl.py` (2026-07-11)
