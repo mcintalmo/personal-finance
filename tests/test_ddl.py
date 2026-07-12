@@ -159,15 +159,9 @@ class TestRoundTrip:
 
 
 class TestConstraints:
-    def test_transaction_requires_existing_account(self, conn):
-        orphan = Transaction(
-            account_id="no-such-account",
-            posted_on=date(2026, 7, 1),
-            amount=Decimal("-1.00"),
-            description_raw="ORPHAN",
-        )
-        with pytest.raises(duckdb.ConstraintException):
-            insert(conn, "transactions", orphan)
+    # NB: referential integrity (e.g. transaction -> account) is intentionally not
+    # a declared FK — see the ddl module docstring. It is checked by dbt
+    # relationship tests, not here.
 
     def test_duplicate_external_id_per_account_rejected(self, conn):
         account = Account(name="Checking", account_type=AccountType.CHECKING)

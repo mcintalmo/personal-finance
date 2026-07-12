@@ -2,7 +2,16 @@
 
 Table definitions mirror the Pydantic models in `personal_finance.models`.
 Statements use ``CREATE TABLE IF NOT EXISTS`` so `create_schema` is idempotent,
-and `TABLES` is ordered so foreign-key dependencies resolve on first creation.
+and `TABLES` is ordered parents-before-children.
+
+Referential integrity is deliberately NOT declared as FOREIGN KEY constraints.
+DuckDB executes UPDATEs on tables that are referenced by (or hold) a foreign key
+as DELETE + INSERT, so updating any column of a referenced row — re-seeding a
+parent category's description, backfilling merchant_id on a transaction that has
+splits — raises an over-eager constraint violation (see DuckDB's documented FK
+limitations). Integrity is instead enforced by dbt relationship tests and at the
+application layer. PRIMARY KEY, UNIQUE, and CHECK constraints are unaffected and
+remain declared.
 
 This is the *application* schema (silver-layer entity tables). Bronze landings
 are Parquet files managed by dlt; gold marts are dbt models (docs/ARCHITECTURE.md).
@@ -47,7 +56,7 @@ TABLES: tuple[tuple[str, str], ...] = (
             id TEXT PRIMARY KEY,
             created_at TIMESTAMPTZ NOT NULL,
             name TEXT NOT NULL,
-            parent_id TEXT REFERENCES categories (id),
+            parent_id TEXT,
             description TEXT,
             note TEXT
         )
@@ -59,12 +68,12 @@ TABLES: tuple[tuple[str, str], ...] = (
         CREATE TABLE IF NOT EXISTS transactions (
             id TEXT PRIMARY KEY,
             created_at TIMESTAMPTZ NOT NULL,
-            account_id TEXT NOT NULL REFERENCES accounts (id),
+            account_id TEXT NOT NULL,
             posted_on DATE NOT NULL,
             amount DECIMAL(18, 2) NOT NULL,
             currency TEXT NOT NULL DEFAULT 'USD',
             description_raw TEXT NOT NULL,
-            merchant_id TEXT REFERENCES merchants (id),
+            merchant_id TEXT,
             external_id TEXT,
             source TEXT,
             note TEXT,
@@ -78,12 +87,12 @@ TABLES: tuple[tuple[str, str], ...] = (
         CREATE TABLE IF NOT EXISTS transaction_splits (
             id TEXT PRIMARY KEY,
             created_at TIMESTAMPTZ NOT NULL,
-            transaction_id TEXT NOT NULL REFERENCES transactions (id),
+            transaction_id TEXT NOT NULL,
             amount DECIMAL(18, 2) NOT NULL,
             description TEXT,
             quantity DECIMAL(18, 4),
             unit_price DECIMAL(18, 4),
-            category_id TEXT REFERENCES categories (id),
+            category_id TEXT,
             categorization_source TEXT,
             categorization_confidence DOUBLE
                 CHECK (categorization_confidence BETWEEN 0 AND 1),
@@ -128,7 +137,7 @@ TABLES: tuple[tuple[str, str], ...] = (
             id TEXT PRIMARY KEY,
             created_at TIMESTAMPTZ NOT NULL,
             name TEXT NOT NULL,
-            category_id TEXT NOT NULL REFERENCES categories (id),
+            category_id TEXT NOT NULL,
             period TEXT NOT NULL,
             amount DECIMAL(18, 2) NOT NULL CHECK (amount > 0),
             starts_on DATE NOT NULL,
@@ -144,7 +153,7 @@ TABLES: tuple[tuple[str, str], ...] = (
             created_at TIMESTAMPTZ NOT NULL,
             subject_kind TEXT NOT NULL,
             subject_id TEXT NOT NULL,
-            category_id TEXT NOT NULL REFERENCES categories (id),
+            category_id TEXT NOT NULL,
             note TEXT
         )
         """,
