@@ -7,8 +7,7 @@
 
 ## Phase 1 — Foundation
 
-- [ ] ⏳ IN PROGRESS — Dummy-data generator: fake receipt images/JSON matching real receipt structure (see Costco anatomy in docs/source-schemas.md)
-- [ ] DuckDB + dbt-duckdb project skeleton: bronze/silver/gold layers, dbt tests wired into CI
+- [ ] ⏳ IN PROGRESS — DuckDB + dbt-duckdb project skeleton: bronze/silver/gold layers, dbt tests wired into CI
 - [ ] `pf` CLI entrypoint (`pf synth`, stubs for `pf ingest` / `pf transform` / `pf enrich`)
 
 ## Backlog (later phases)
@@ -17,6 +16,8 @@ See [docs/FEATURES.md](docs/FEATURES.md) — Phases 2–8. Tasks are promoted in
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
+
+- [x] Receipt fixtures: JSON payloads (vision-LLM output shape) + text renderings decomposed from scenario grocery charges, with ground-truth manifest for Phase 5 matching eval — `synth/receipts.py` (2026-07-12). Image rendering deferred to Phase 5 (needs pillow).
 
 - [x] Dummy-data generator `personal_finance.synth`: deterministic scenario + 15 export formats (14 CSV layouts incl. quirks + OFX 1.02), correlated transfer pairs for Phase 3 — `synth/scenario.py`, `synth/writers.py` (2026-07-12)
 

@@ -9,6 +9,13 @@ No real financial data is ever used or embedded. Generation is seeded: the same
 seed produces byte-identical exports.
 """
 
+from personal_finance.synth.receipts import (
+    Receipt,
+    ReceiptItem,
+    generate_receipts,
+    render_receipt_text,
+    write_receipts,
+)
 from personal_finance.synth.scenario import (
     Scenario,
     SynthAccount,
@@ -19,10 +26,15 @@ from personal_finance.synth.writers import FORMATS, render, write_scenario
 
 __all__ = [
     "FORMATS",
+    "Receipt",
+    "ReceiptItem",
     "Scenario",
     "SynthAccount",
     "SynthTransaction",
+    "generate_receipts",
     "generate_scenario",
     "render",
+    "render_receipt_text",
+    "write_receipts",
     "write_scenario",
 ]
