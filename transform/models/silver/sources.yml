@@ -1,0 +1,10 @@
+version: 2
+
+# The application's entity tables (created by personal_finance.ddl, seeded by
+# personal_finance.seed) live in the warehouse's main schema.
+sources:
+  - name: app
+    schema: main
+    tables:
+      - name: categories
+        description: Hierarchical taxonomy seeded from config taxonomy.yaml.

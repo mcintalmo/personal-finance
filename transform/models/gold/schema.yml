@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: gold_category_paths
+    description: One row per category with its full taxonomy path and depth.
+    columns:
+      - name: id
+        data_tests: [unique, not_null]
+      - name: path
+        data_tests: [unique, not_null]
+      - name: depth
+        data_tests: [not_null]

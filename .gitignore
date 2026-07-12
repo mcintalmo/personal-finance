@@ -199,3 +199,12 @@ infra/terraform/.terraform.lock.hcl
 # Live config may describe real accounts/finances — never commit it.
 # Copy config/examples/*.yaml into config/ and edit (see config/README.md).
 config/*.yaml
+
+# ── Data warehouse / dbt ────────────────────────────────────
+data/
+*.duckdb
+*.duckdb.wal
+transform/target/
+transform/dbt_packages/
+transform/logs/
+transform/.user.yml

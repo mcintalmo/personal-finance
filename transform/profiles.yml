@@ -1,0 +1,11 @@
+# Committed on purpose: local paths only, no secrets.
+# The warehouse path is shared with the Python app via DATA_WAREHOUSE_PATH
+# (see personal_finance.config.DataSettings). Default matches Settings.
+
+personal_finance:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DATA_WAREHOUSE_PATH', 'data/warehouse.duckdb') }}"
+      threads: 4

@@ -33,6 +33,16 @@ class AppSettings(BaseModel):
     log_level: str = "INFO"
 
 
+class DataSettings(BaseModel):
+    """Data platform settings (``settings.data.*``).
+
+    ``warehouse_path`` is shared with dbt: transform/profiles.yml reads the
+    same DATA_WAREHOUSE_PATH environment variable.
+    """
+
+    warehouse_path: Path = Path("data/warehouse.duckdb")
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -47,6 +57,9 @@ class Settings(BaseSettings):
 
     # ── Application ───────────────────────────────────────
     app: AppSettings = Field(default_factory=AppSettings)
+
+    # ── Data platform ─────────────────────────────────────
+    data: DataSettings = Field(default_factory=DataSettings)
 
     # ── Paths ─────────────────────────────────────────────
     config_dir: Path = Path("config")  # user-editable YAML config (see user_config.py)

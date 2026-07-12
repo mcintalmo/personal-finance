@@ -1,0 +1,23 @@
+# dbt project for the medallion transform layer (docs/ARCHITECTURE.md).
+# Bronze = raw Parquet landings (dlt, Phase 2) exposed as dbt sources.
+# Silver = cleaned/enriched models. Gold = query-ready marts.
+
+name: personal_finance_transform
+version: "0.1.0"
+profile: personal_finance
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  personal_finance_transform:
+    silver:
+      +materialized: view
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold
