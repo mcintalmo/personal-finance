@@ -1,0 +1,15 @@
+# Deterministic categorization rules — stage 1 of the enrichment cascade.
+# First matching rule wins; patterns are regular expressions run against
+# `applies_to` (default: the raw transaction description).
+
+- pattern: "(?i)trader joe|kroger|safeway|aldi"
+  category: essentials/groceries
+
+- pattern: "(?i)shell|chevron|exxon|bp\\b"
+  category: essentials/commute/gas
+
+- pattern: "(?i)netflix|spotify|hulu"
+  category: non-essentials/entertainment/streaming
+
+- pattern: "(?i)payroll|direct dep"
+  category: income/salary

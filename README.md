@@ -30,6 +30,10 @@ uv run pre-commit install
 # Configure local environment
 cp .env.example .env.local
 # Edit .env.local with your local values
+
+# Set up user configuration from the committed examples (dummy data).
+# Live files in config/ are gitignored — safe to fill with real information.
+cp config/examples/*.yaml config/
 ```
 
 ## Development

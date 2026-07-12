@@ -1,0 +1,38 @@
+# The hierarchical category taxonomy. Nesting defines the hierarchy; depth is
+# unlimited. Categories are referenced elsewhere by slash-separated path,
+# e.g. `essentials/groceries/apples`.
+
+- name: essentials
+  description: Necessary spending
+  children:
+    - name: groceries
+      children:
+        - name: apples
+        - name: produce
+        - name: staples
+    - name: commute
+      children:
+        - name: gas
+        - name: transit
+    - name: housing
+      children:
+        - name: rent
+        - name: utilities
+
+- name: non-essentials
+  description: Discretionary spending
+  children:
+    - name: groceries
+      description: Non-essential grocery items (e.g. apple pie)
+    - name: dining
+    - name: entertainment
+      children:
+        - name: streaming
+
+- name: income
+  children:
+    - name: salary
+    - name: interest
+
+- name: transfers
+  description: Money moved between own accounts; excluded from spend
