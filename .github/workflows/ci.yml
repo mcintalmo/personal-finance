@@ -48,7 +48,7 @@ jobs:
         run: uv run pytest --cov=personal_finance --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         # Optional — delete this step if you don't use Codecov.
         # Sign up at https://codecov.io and add CODECOV_TOKEN to GitHub Secrets.
         if: ${{ always() }}
