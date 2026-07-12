@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
 
+# Least privilege: the placeholder deploy only reads the repo. Widen per-job when a
+# real deploy needs it (e.g. packages: write for GHCR pushes).
+permissions:
+  contents: read
+
 # Only run one deployment at a time.
 concurrency:
   group: ${{ github.workflow }}

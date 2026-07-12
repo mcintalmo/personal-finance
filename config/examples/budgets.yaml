@@ -1,0 +1,17 @@
+# Budget buckets. `category` targets a taxonomy subtree: spend in that category
+# and all its descendants counts against the budget.
+
+- name: Groceries
+  category: essentials/groceries
+  period: monthly
+  amount: 500
+
+- name: Dining out
+  category: non-essentials/dining
+  period: monthly
+  amount: 200
+
+- name: Streaming
+  category: non-essentials/entertainment/streaming
+  period: monthly
+  amount: 40

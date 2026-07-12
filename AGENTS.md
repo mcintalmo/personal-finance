@@ -114,6 +114,7 @@ If `pre-commit` is installed, `git commit` runs these automatically.
 - Use **`dataclasses.dataclass`** for simple, immutable data containers with no validation.
 - Use **`pydantic.BaseModel`** for any data that requires validation, serialization, or comes from external sources (API responses, user input, config files with complex types).
 - Use **`pydantic_settings.BaseSettings`** for application configuration and settings. Never use plain dataclasses or dicts for settings.
+- Settings are organized into **nested groups**: `settings.app.debug`, never `settings.app_debug`. If several settings share a prefix, they belong in a group. Groups are plain `BaseModel`s (only the top-level `Settings` is `BaseSettings`); env vars address them by prefix (e.g. `APP_DEBUG=true` → `settings.app.debug`, via `env_nested_delimiter="_"` + `env_nested_max_split=1`). Keep `.env.example` updated when adding settings.
 
 ### Error handling
 - Raise specific exception types. Never `raise Exception("...")`.

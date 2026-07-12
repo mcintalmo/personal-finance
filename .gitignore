@@ -165,7 +165,8 @@ cython_debug/
 
 # ── Environment / secrets (★) ────────────────────────────────
 .env.*
-!.env.example       # keep the example template committed
+# keep the example template committed (no inline comments — gitignore reads them as part of the pattern)
+!.env.example
 *.local
 
 # ── OS (★) ───────────────────────────────────────────────────
@@ -193,3 +194,8 @@ infra/terraform/.terraform.lock.hcl
 
 # ── Claude Code (★) ───────────────────────────────────────────
 .claude/settings.local.json   # personal overrides — never commit
+
+# ── User configuration ──────────────────────────────────────
+# Live config may describe real accounts/finances — never commit it.
+# Copy config/examples/*.yaml into config/ and edit (see config/README.md).
+config/*.yaml

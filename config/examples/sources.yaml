@@ -1,0 +1,28 @@
+# Data sources to ingest. Each entry configures one export format.
+# `name` is the stable identifier used in provenance; rename freely via `account_name`.
+# `column_map` maps model fields -> source CSV columns (not needed for OFX).
+
+- name: chase_checking
+  kind: csv
+  account_name: Chase Checking
+  account_type: checking
+  column_map:
+    posted_on: Posting Date
+    amount: Amount
+    description_raw: Description
+  date_format: "%m/%d/%Y"
+
+- name: chase_sapphire
+  kind: ofx
+  account_name: Chase Sapphire
+  account_type: credit_card
+
+- name: venmo
+  kind: csv
+  account_name: Venmo
+  account_type: payment_app
+  column_map:
+    posted_on: Datetime
+    amount: Amount (total)
+    description_raw: Note
+  date_format: "%Y-%m-%dT%H:%M:%S"

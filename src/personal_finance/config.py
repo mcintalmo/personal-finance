@@ -2,13 +2,20 @@
 
 Settings are loaded from environment variables and .env.local (development only).
 See .env.example for the full list of supported variables.
+
+Settings are organized into nested groups (``settings.app.debug``, not
+``settings.app_debug``). Only the top-level :class:`Settings` reads the
+environment; groups are plain models, addressed in env vars by prefix:
+``APP_DEBUG=true`` sets ``settings.app.debug``.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +23,14 @@ class Environment(StrEnum):
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
+
+
+class AppSettings(BaseModel):
+    """Core application settings (``settings.app.*``)."""
+
+    env: Environment = Environment.DEVELOPMENT
+    debug: bool = False
+    log_level: str = "INFO"
 
 
 class Settings(BaseSettings):
@@ -26,20 +41,23 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",  # ignore unknown env vars
+        env_nested_delimiter="_",
+        env_nested_max_split=1,  # APP_LOG_LEVEL -> app.log_level (split once, keep field underscores)
     )
 
     # ── Application ───────────────────────────────────────
-    app_env: Environment = Environment.DEVELOPMENT
-    app_debug: bool = False
-    app_log_level: str = "INFO"
+    app: AppSettings = Field(default_factory=AppSettings)
+
+    # ── Paths ─────────────────────────────────────────────
+    config_dir: Path = Path("config")  # user-editable YAML config (see user_config.py)
 
     @property
     def is_production(self) -> bool:
-        return self.app_env == Environment.PRODUCTION
+        return self.app.env == Environment.PRODUCTION
 
     @property
     def is_development(self) -> bool:
-        return self.app_env == Environment.DEVELOPMENT
+        return self.app.env == Environment.DEVELOPMENT
 
 
 @lru_cache

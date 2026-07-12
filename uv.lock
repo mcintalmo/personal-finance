@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.14"
 
 [options]
-exclude-newer = "2026-07-04T23:24:04.323505Z"
+exclude-newer = "2026-07-05T00:08:57.179291Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -149,6 +149,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -165,6 +166,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.4" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [package.metadata.requires-dev]
