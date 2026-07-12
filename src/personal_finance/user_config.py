@@ -24,6 +24,7 @@ import re
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
+from uuid import NAMESPACE_URL, uuid5
 
 import yaml
 
@@ -167,16 +168,29 @@ def _walk_taxonomy(
         yield from _walk_taxonomy(node.children, prefix=path)
 
 
+def category_id_for_path(path: str) -> str:
+    """Return the deterministic category ID for a taxonomy path.
+
+    IDs are UUIDv5 hashes of the path, so the same path always yields the same
+    ID across runs — this is what makes re-seeding the ``categories`` table an
+    idempotent upsert. Renaming a category changes its path and therefore its
+    identity.
+    """
+    return uuid5(NAMESPACE_URL, f"personal-finance:category:{path}").hex
+
+
 def taxonomy_to_categories(nodes: list[TaxonomyNode]) -> dict[str, Category]:
     """Flatten a taxonomy tree into Category models keyed by path.
 
-    Parent/child relationships are preserved via ``Category.parent_id``, ready
-    for insertion into the ``categories`` table.
+    Parent/child relationships are preserved via ``Category.parent_id``, and IDs
+    are deterministic (see :func:`category_id_for_path`), ready for idempotent
+    insertion into the ``categories`` table.
     """
     categories: dict[str, Category] = {}
     for path, node, parent_path in _walk_taxonomy(nodes):
         parent_id = categories[parent_path].id if parent_path else None
         categories[path] = Category(
+            id=category_id_for_path(path),
             name=node.name,
             parent_id=parent_id,
             description=node.description,

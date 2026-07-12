@@ -7,8 +7,7 @@
 
 ## Phase 1 — Foundation
 
-- [ ] ⏳ IN PROGRESS — Seed hierarchical category taxonomy from YAML into DuckDB (flattening via `taxonomy_to_categories` is done; remaining: idempotent insert into the `categories` table)
-- [ ] Dummy-data generator `personal_finance.synth`: realistic CSV/OFX bank + credit card exports
+- [ ] ⏳ IN PROGRESS — Dummy-data generator `personal_finance.synth`: realistic CSV/OFX bank + credit card exports
 - [ ] Dummy-data generator: fake receipt images/JSON matching real receipt structure
 - [ ] DuckDB + dbt-duckdb project skeleton: bronze/silver/gold layers, dbt tests wired into CI
 - [ ] `pf` CLI entrypoint (`pf synth`, stubs for `pf ingest` / `pf transform` / `pf enrich`)
@@ -19,6 +18,8 @@ See [docs/FEATURES.md](docs/FEATURES.md) — Phases 2–8. Tasks are promoted in
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
+
+- [x] Seed taxonomy into DuckDB: deterministic UUIDv5 category IDs, idempotent upsert preserving user notes — `seed.py`; dropped declared FKs due to DuckDB update-as-delete+insert limitation (integrity moves to dbt tests) (2026-07-11)
 
 - [x] YAML configuration system: Pydantic-validated loaders for sources, taxonomy, rules, budgets — `user_config.py`, sample `config/*.yaml` (2026-07-11)
 - [x] Add least-privilege `permissions` blocks to CI/CD workflows (code-scanning fix) (2026-07-11)

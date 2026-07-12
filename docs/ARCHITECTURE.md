@@ -122,6 +122,13 @@ Splits are what make "how much have I spent this year on apples" answerable whil
 "how much did I spend last week" stays a trivial rollup. Schema patterns are borrowed
 from Firefly III and Actual Budget (battle-tested transaction/split/transfer models).
 
+Referential integrity is enforced by dbt relationship tests and application logic,
+not declared FOREIGN KEYs: DuckDB runs UPDATEs on FK-involved tables as
+DELETE + INSERT, so updating any referenced row (a parent category, a transaction
+with splits) would raise over-eager constraint violations. Category identity is a
+deterministic UUIDv5 of the taxonomy path, making taxonomy seeding an idempotent
+upsert that never touches user-authored ``note`` values.
+
 ---
 
 ## Security posture
