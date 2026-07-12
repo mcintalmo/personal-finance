@@ -8,11 +8,7 @@ This is the *application* schema (silver-layer entity tables). Bronze landings
 are Parquet files managed by dlt; gold marts are dbt models (docs/ARCHITECTURE.md).
 """
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import duckdb
-
+import duckdb
 TABLES: tuple[tuple[str, str], ...] = (
     (
         "accounts",
