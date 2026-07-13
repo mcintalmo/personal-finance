@@ -23,3 +23,7 @@ class ValidationError(PersonalfinanceError):
 
 class ExternalServiceError(PersonalfinanceError):
     """Raised when an external service call fails."""
+
+
+class IngestionError(PersonalfinanceError):
+    """Raised when a source export file cannot be parsed into bronze rows."""

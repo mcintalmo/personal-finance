@@ -1,6 +1,8 @@
 # Data sources to ingest. Each entry configures one export format.
 # `name` is the stable identifier used in provenance; rename freely via `account_name`.
-# `column_map` maps model fields -> source CSV columns (not needed for OFX).
+# `column_map` maps canonical fields -> source CSV columns (not needed for OFX).
+# See docs/source-schemas.md for the full capability matrix — a new bank/card
+# should fit these fields without any code change.
 
 - name: chase_checking
   kind: csv
@@ -25,4 +27,68 @@
     posted_on: Datetime
     amount: Amount (total)
     description_raw: Note
+    external_id: ID
   date_format: "%Y-%m-%dT%H:%M:%S"
+
+# Wells Fargo ships no header row at all — positional columns via `columns`.
+- name: wells_fargo
+  kind: csv
+  account_name: Wells Fargo Checking
+  account_type: checking
+  has_header: false
+  columns: [posted_on, amount, status, check_number, description_raw]
+  column_map:
+    posted_on: posted_on
+    amount: amount
+    description_raw: description_raw
+  date_format: "%m/%d/%Y"
+
+# Bank of America's export opens with a summary preamble before the real
+# header — skip_rows jumps straight to it.
+- name: bofa_checking
+  kind: csv
+  account_name: Bank of America Checking
+  account_type: checking
+  skip_rows: 3
+  column_map:
+    posted_on: Date
+    amount: Amount
+    description_raw: Description
+  date_format: "%m/%d/%Y"
+
+# Capital One splits money in/out across two positive-only columns.
+- name: capital_one
+  kind: csv
+  account_name: Capital One Card
+  account_type: credit_card
+  sign_convention: debit_credit
+  column_map:
+    posted_on: Posted Date
+    debit: Debit
+    credit: Credit
+    description_raw: Description
+  date_format: "%Y-%m-%d"
+
+- name: citi
+  kind: csv
+  account_name: Citi Card
+  account_type: credit_card
+  sign_convention: debit_credit
+  column_map:
+    posted_on: Date
+    debit: Debit
+    credit: Credit
+    description_raw: Description
+  date_format: "%m/%d/%Y"
+
+# Amex and Discover invert our convention: charges are positive.
+- name: amex
+  kind: csv
+  account_name: Amex Card
+  account_type: credit_card
+  sign_convention: inverted
+  column_map:
+    posted_on: Date
+    amount: Amount
+    description_raw: Description
+  date_format: "%m/%d/%Y"

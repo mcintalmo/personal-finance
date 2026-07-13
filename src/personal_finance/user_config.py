@@ -59,6 +59,17 @@ class SourceKind(StrEnum):
     OFX = "ofx"
 
 
+class SignConvention(StrEnum):
+    """How a CSV source's amount column(s) map onto our internal signed
+    convention (negative = outflow). See the capability matrix in
+    docs/source-schemas.md.
+    """
+
+    SIGNED = "signed"  # single 'amount' column, already negative=outflow
+    INVERTED = "inverted"  # single 'amount' column, positive=outflow (flip on ingest)
+    DEBIT_CREDIT = "debit_credit"  # separate 'debit'/'credit' columns, both non-negative
+
+
 class _ConfigModel(BaseModel):
     """Base for config models: unknown keys are typos and must fail loudly."""
 
@@ -66,15 +77,55 @@ class _ConfigModel(BaseModel):
 
 
 class SourceConfig(_ConfigModel):
-    """One data source to ingest, e.g. a bank's CSV export format."""
+    """One data source to ingest, e.g. a bank's CSV export format.
+
+    ``column_map`` maps canonical field names to the source file's raw column
+    names. Required keys depend on ``sign_convention``: ``signed``/``inverted``
+    need ``posted_on``, ``description_raw``, ``amount``; ``debit_credit`` needs
+    ``posted_on``, ``description_raw``, ``debit``, ``credit``. ``external_id``
+    is always optional. These requirements are enforced only for ``kind: csv``
+    — OFX parses the structured format directly and ignores ``column_map``.
+    """
 
     name: str = Field(min_length=1)  # stable identifier, used in provenance
     kind: SourceKind
     account_name: str = Field(min_length=1)  # display name of the backing account
     account_type: AccountType
     currency: str = "USD"
-    column_map: dict[str, str] = Field(default_factory=dict)  # model field -> source column
-    date_format: str | None = None  # strptime format for CSV date columns
+    column_map: dict[str, str] = Field(default_factory=dict)  # canonical field -> source column
+    date_format: str | None = None  # strptime format for date/datetime columns
+
+    has_header: bool = True
+    skip_rows: int = Field(default=0, ge=0)  # preamble lines to skip before the header
+    columns: list[str] | None = None  # positional column names, required if has_header=False
+    sign_convention: SignConvention = SignConvention.SIGNED
+
+    @model_validator(mode="after")
+    def _check_csv_layout(self) -> SourceConfig:
+        if self.kind != SourceKind.CSV:
+            return self
+        required = {"posted_on", "description_raw"}
+        required |= (
+            {"debit", "credit"}
+            if self.sign_convention == SignConvention.DEBIT_CREDIT
+            else {"amount"}
+        )
+        missing = required - self.column_map.keys()
+        if missing:
+            msg = f"source {self.name!r}: column_map missing required keys {sorted(missing)}"
+            raise ValueError(msg)
+        if not self.has_header and not self.columns:
+            msg = f"source {self.name!r}: has_header=false requires 'columns' (positional names)"
+            raise ValueError(msg)
+        if self.columns:
+            unknown = set(self.column_map.values()) - set(self.columns)
+            if unknown:
+                msg = (
+                    f"source {self.name!r}: column_map references columns not in "
+                    f"'columns': {sorted(unknown)}"
+                )
+                raise ValueError(msg)
+        return self
 
 
 class TaxonomyNode(_ConfigModel):
