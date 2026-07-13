@@ -12,5 +12,6 @@ models:
         description: Must reference an existing category (replaces the declared FK).
         data_tests:
           - relationships:
-              to: ref('silver_categories')
-              field: id
+              arguments:
+                to: ref('silver_categories')
+                field: id

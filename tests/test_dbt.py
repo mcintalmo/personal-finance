@@ -6,6 +6,7 @@ tests are wired into CI with no extra workflow step: if a dbt data test fails,
 CI fails.
 """
 
+import warnings
 from pathlib import Path
 
 import duckdb
@@ -15,40 +16,44 @@ from personal_finance.ddl import create_schema
 from personal_finance.seed import seed_categories
 from personal_finance.user_config import load_user_config
 
-# dbt emits assorted deprecation/resource warnings from its own dependency
-# stack; those are not this project's regressions.
-pytestmark = pytest.mark.filterwarnings("ignore")
-
 REPO_ROOT = Path(__file__).parent.parent
 EXAMPLES_CONFIG_DIR = REPO_ROOT / "config" / "examples"
 
 
 @pytest.fixture(scope="module")
 def built_warehouse(tmp_path_factory):
-    """A seeded warehouse on which `dbt build` has run once."""
-    from dbt.cli.main import dbtRunner
+    """A seeded warehouse on which `dbt build` has run once.
 
+    Env-var handling and warning suppression are scoped to the dbt invocation
+    only: a developer's own DATA_WAREHOUSE_PATH is restored afterwards, and
+    warnings from this project's code (schema creation, seeding) still fail
+    the run under the global ``filterwarnings = error`` regime — only dbt's
+    dependency-stack noise is silenced.
+    """
     warehouse = tmp_path_factory.mktemp("wh") / "warehouse.duckdb"
     config = load_user_config(EXAMPLES_CONFIG_DIR)
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
         seed_categories(conn, config.taxonomy)
 
-    import os
-
-    os.environ["DATA_WAREHOUSE_PATH"] = str(warehouse)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
     try:
-        result = dbtRunner().invoke(
-            [
-                "build",
-                "--project-dir",
-                str(REPO_ROOT / "transform"),
-                "--profiles-dir",
-                str(REPO_ROOT / "transform"),
-            ]
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                ]
+            )
     finally:
-        del os.environ["DATA_WAREHOUSE_PATH"]
+        monkeypatch.undo()
     return warehouse, config, result
 
 
