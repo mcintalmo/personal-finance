@@ -12,7 +12,11 @@ dependencies = [
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
+    "typer>=0.26.8",
 ]
+
+[project.scripts]
+pf = "personal_finance.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/mcintalmo/personal-finance"

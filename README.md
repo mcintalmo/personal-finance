@@ -36,6 +36,18 @@ cp .env.example .env.local
 cp config/examples/*.yaml config/
 ```
 
+## Usage
+
+The `pf` CLI drives the pipeline (run via `uv run pf ...`):
+
+```bash
+uv run pf synth        # generate dummy bank/card exports + receipt fixtures
+uv run pf init-db      # create the DuckDB warehouse and seed the taxonomy
+uv run pf transform    # run the dbt medallion build (models + data tests)
+uv run pf ingest       # (Phase 2) ingest exports into bronze
+uv run pf enrich       # (Phase 4) categorization cascade
+```
+
 ## Development
 
 ```bash

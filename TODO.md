@@ -5,16 +5,26 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 1 — Foundation
+## Phase 2 — Ingestion
 
-- [ ] ⏳ IN PROGRESS — `pf` CLI entrypoint (`pf synth`, `pf init-db`, `pf transform`, stubs for `pf ingest` / `pf enrich`)
+> Phase 1 (Foundation) is complete — demo verified 2026-07-12: `pf synth` → fixtures,
+> `pf init-db` → seeded warehouse, `pf transform` → dbt build PASS=11.
+
+- [ ] ⏳ IN PROGRESS — dlt pipeline: CSV bank/CC exports into bronze Parquet (per-source YAML column mapping via `sources.yaml`)
+- [ ] dlt pipeline: OFX/QFX exports
+- [ ] Bronze layer provenance: source name + file + ingested_at on every row
+- [ ] Idempotent re-ingestion (same file twice ≠ duplicate transactions)
+- [ ] Watch-folder ingestion (drop a file, it gets picked up)
+- [ ] Wire `pf ingest` to the dlt pipelines
 
 ## Backlog (later phases)
 
-See [docs/FEATURES.md](docs/FEATURES.md) — Phases 2–8. Tasks are promoted into this file
+See [docs/FEATURES.md](docs/FEATURES.md) — Phases 3–8. Tasks are promoted into this file
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
+
+- [x] `pf` CLI entrypoint: `synth` / `init-db` / `transform` working end-to-end, `ingest` / `enrich` stubs pointing at their phases — `cli.py`, typer + `[project.scripts]` (2026-07-12). **Phase 1 complete.**
 
 - [x] dbt-duckdb skeleton: `transform/` project with silver/gold models over seeded categories, relationships test replacing the dropped FK, recursive gold_category_paths mart; dbt build runs inside pytest so dbt data tests gate CI with no workflow change; mashumaro override for Python 3.14 (2026-07-12)
 
