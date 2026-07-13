@@ -7,6 +7,7 @@ license = { text = "MIT" }
 authors = [{ name = "Alex McIntosh", email = "mcintalmo@gmail.com" }]
 requires-python = ">=3.14"
 dependencies = [
+    "dbt-duckdb>=1.10.1",
     "duckdb>=1.5.4",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
@@ -45,6 +46,10 @@ dev = [
 # ── uv ──────────────────────────────────────────────────────
 [tool.uv]
 package = true   # treat as an installable package (src layout)
+# dbt-common pins mashumaro <3.15, which cannot import on Python 3.14
+# (UnserializableField at import time). mashumaro >=3.22 fixes 3.14 support
+# and dbt works with it; drop this override once dbt raises its pin.
+override-dependencies = ["mashumaro[msgpack]>=3.22"]
 
 # ── Ruff ────────────────────────────────────────────────────
 # Replaces: black, isort, flake8, pyupgrade, and most plugins.

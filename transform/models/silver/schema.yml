@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: silver_categories
+    description: Cleaned category taxonomy (one row per category node).
+    columns:
+      - name: id
+        data_tests: [unique, not_null]
+      - name: name
+        data_tests: [not_null]
+      - name: parent_id
+        description: Must reference an existing category (replaces the declared FK).
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id

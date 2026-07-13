@@ -7,8 +7,7 @@
 
 ## Phase 1 — Foundation
 
-- [ ] ⏳ IN PROGRESS — DuckDB + dbt-duckdb project skeleton: bronze/silver/gold layers, dbt tests wired into CI
-- [ ] `pf` CLI entrypoint (`pf synth`, stubs for `pf ingest` / `pf transform` / `pf enrich`)
+- [ ] ⏳ IN PROGRESS — `pf` CLI entrypoint (`pf synth`, `pf init-db`, `pf transform`, stubs for `pf ingest` / `pf enrich`)
 
 ## Backlog (later phases)
 
@@ -16,6 +15,8 @@ See [docs/FEATURES.md](docs/FEATURES.md) — Phases 2–8. Tasks are promoted in
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
+
+- [x] dbt-duckdb skeleton: `transform/` project with silver/gold models over seeded categories, relationships test replacing the dropped FK, recursive gold_category_paths mart; dbt build runs inside pytest so dbt data tests gate CI with no workflow change; mashumaro override for Python 3.14 (2026-07-12)
 
 - [x] Receipt fixtures: JSON payloads (vision-LLM output shape) + text renderings decomposed from scenario grocery charges, with ground-truth manifest for Phase 5 matching eval — `synth/receipts.py` (2026-07-12). Image rendering deferred to Phase 5 (needs pillow).
 
