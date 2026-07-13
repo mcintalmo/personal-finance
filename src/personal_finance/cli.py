@@ -12,7 +12,6 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf enrich      (Phase 4 stub)
 """
 
-import logging
 import os
 from pathlib import Path
 
@@ -30,8 +29,6 @@ from personal_finance.synth import (
     write_scenario,
 )
 from personal_finance.user_config import load_user_config
-
-logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="pf",

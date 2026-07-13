@@ -38,7 +38,8 @@ class TestSynth:
 
     def test_seed_determinism(self, tmp_path):
         for name in ("a", "b"):
-            runner.invoke(app, ["synth", "--out", str(tmp_path / name), "--months", "1"])
+            result = runner.invoke(app, ["synth", "--out", str(tmp_path / name), "--months", "1"])
+            assert result.exit_code == 0, result.output
         a = (tmp_path / "a" / "exports" / "chase_checking.csv").read_text()
         b = (tmp_path / "b" / "exports" / "chase_checking.csv").read_text()
         assert a == b
