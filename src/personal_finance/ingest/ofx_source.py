@@ -23,13 +23,18 @@ import dlt
 from ofxtools.Parser import OFXTree
 
 from personal_finance.exceptions import IngestionError
+from personal_finance.ingest.dedup import compute_row_hash
 from personal_finance.user_config import SourceConfig
 
 BronzeRow = dict[str, object]
 
 
-def read_ofx_transactions(file_path: Path) -> Iterator[dict[str, object]]:
+def read_ofx_transactions(source_name: str, file_path: Path) -> Iterator[dict[str, object]]:
     """Yield one canonical dict per transaction across all statements in a file.
+
+    ``source_name`` keys each row's ``row_hash`` (the idempotency key), so it
+    is scoped to this source and never collides with another account's
+    identical activity.
 
     Raises:
         IngestionError: If the file cannot be parsed as OFX/QFX.
@@ -49,11 +54,16 @@ def read_ofx_transactions(file_path: Path) -> Iterator[dict[str, object]]:
             # NAME is the payee; MEMO is extra detail. Combine into the raw
             # description when MEMO adds something beyond NAME.
             description_raw = f"{name} {memo}".strip() if memo and memo != name else name
+            posted_on = txn.dtposted.date()
+            external_id = txn.fitid
             yield {
-                "posted_on": txn.dtposted.date(),
+                "posted_on": posted_on,
                 "amount": txn.trnamt,  # already signed: negative = outflow
                 "description_raw": description_raw,
-                "external_id": txn.fitid,
+                "external_id": external_id,
+                "row_hash": compute_row_hash(
+                    source_name, posted_on, txn.trnamt, description_raw, external_id
+                ),
             }
 
 
@@ -66,7 +76,7 @@ def ofx_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRo
             ``read_ofx_transactions`` on the first pull).
     """
     ingested_at = datetime.now(UTC)
-    for parsed in read_ofx_transactions(file_path):
+    for parsed in read_ofx_transactions(source.name, file_path):
         yield {
             "source": source.name,
             "account_name": source.account_name,

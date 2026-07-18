@@ -7,6 +7,7 @@ from dlt.destinations import filesystem
 
 from personal_finance.exceptions import IngestionError
 from personal_finance.ingest.csv_source import csv_transactions
+from personal_finance.ingest.dedup import existing_row_hashes
 from personal_finance.ingest.ofx_source import ofx_transactions
 from personal_finance.user_config import SourceKind
 
@@ -22,13 +23,21 @@ if TYPE_CHECKING:
 def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadInfo:
     """Load one resource into ``bronze_dir/bronze/<source.name>/`` as Parquet.
 
-    Bronze is append-only; re-ingesting a file appends another copy of its rows
-    (dedup is a later task — dlt's filesystem destination has no merge). Any
-    IngestionError raised inside the resource is wrapped by dlt in
+    Idempotent append: bronze is append-only (dlt's filesystem destination has
+    no merge), so before appending we drop any row whose ``row_hash`` already
+    exists in this source's bronze table. Re-ingesting the same file — or a
+    later export whose date range overlaps an earlier one — therefore adds no
+    duplicates, while genuinely-new rows still land. See ``dedup`` for how the
+    hash is keyed.
+
+    Any IngestionError raised inside the resource is wrapped by dlt in
     PipelineStepFailed/ResourceExtractionError; this unwraps that chain so
     callers only ever see our exception type, per the exception-boundary
     convention.
     """
+    seen = existing_row_hashes(bronze_dir, source.name)
+    if seen:
+        resource.add_filter(lambda row: row["row_hash"] not in seen)
     pipeline = dlt.pipeline(
         pipeline_name=f"bronze_{source.name}",
         destination=filesystem(bucket_url=str(bronze_dir)),

@@ -10,9 +10,8 @@
 > Phase 1 (Foundation) is complete — demo verified 2026-07-12: `pf synth` → fixtures,
 > `pf init-db` → seeded warehouse, `pf transform` → dbt build PASS=11.
 
-- [ ] ⏳ IN PROGRESS — Idempotent re-ingestion (same file twice ≠ duplicate transactions) — bronze is currently append-only; dlt's filesystem destination doesn't support merge
+- [ ] ⏳ IN PROGRESS — Wire `pf ingest` to the dlt pipelines (`run_ingestion` already dispatches on source.kind)
 - [ ] Watch-folder ingestion (drop a file, it gets picked up)
-- [ ] Wire `pf ingest` to the dlt pipelines (`run_ingestion` already dispatches on source.kind)
 
 ## Backlog (later phases)
 
@@ -21,6 +20,7 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Idempotent re-ingestion: every bronze row carries a deterministic `row_hash` (keyed on `external_id` when present, else content `source|posted_on|amount|description_raw`); the pipeline reads a source's already-landed hashes and filters them before appending, so re-dropping the same file — or an overlapping export — adds no duplicates. Bronze stays append-only (never mutated/deleted). Works around dlt filesystem having no merge disposition — `ingest/dedup.py`, `pipeline._run` (2026-07-18)
 - [x] dlt pipeline: OFX/QFX exports into bronze via ofxtools (1.x SGML / 2.x XML / QFX). TRNAMT already signed so no sign_convention; FITID → external_id (idempotency key). `run_ingestion` now dispatches on source.kind; shared pipeline/unwrap logic. Also fixed synth OFX to be spec-valid (added required LEDGERBAL) so the strict parser accepts the fixture — `ingest/ofx_source.py` (2026-07-18)
 - [x] dlt pipeline: CSV bank/CC exports into bronze Parquet, with provenance (source/account/currency/source_file/ingested_at on every row) — `personal_finance.ingest` (csv_source.py, pipeline.py). Config-driven: `SourceConfig` gained `has_header`/`skip_rows`/`columns`/`sign_convention` (signed/inverted/debit_credit) covering the capability matrix in docs/source-schemas.md. Verified end-to-end against real synth fixtures for chase_checking, venmo, wells_fargo (headerless), bofa_checking (skip_rows), capital_one/citi (debit_credit), amex (inverted) (2026-07-12)
 

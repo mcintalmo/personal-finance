@@ -211,15 +211,17 @@ class TestRunCsvIngestion:
         with pytest.raises(IngestionError, match=r"ragged\.csv"):
             run_csv_ingestion(source, bad_file, tmp_path / "bronze")
 
-    def test_reingesting_same_file_appends(self, exports, tmp_path):
-        """Documents current append-only behaviour — dedup is a later task."""
+    def test_reingesting_same_file_is_idempotent(self, exports, tmp_path):
+        """Re-ingestion adds no duplicates: rows already in bronze (matched by
+        ``row_hash``) are filtered out. See tests/test_ingest_dedup.py for the
+        full idempotency coverage."""
         source = source_by_name("chase_checking")
         file_path = exports / "chase_checking.csv"
         run_csv_ingestion(source, file_path, tmp_path / "bronze")
         first_count = len(bronze_rows(tmp_path / "bronze", "chase_checking"))
         run_csv_ingestion(source, file_path, tmp_path / "bronze")
         second_count = len(bronze_rows(tmp_path / "bronze", "chase_checking"))
-        assert second_count == first_count * 2
+        assert second_count == first_count
 
 
 class TestSourceConfigCsvValidation:

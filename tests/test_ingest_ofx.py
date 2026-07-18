@@ -55,27 +55,29 @@ def bronze_columns(bronze_dir: Path, table_name: str) -> list[str]:
 
 class TestReadOfxTransactions:
     def test_parses_all_transactions(self, scenario, ofx_file):
-        rows = list(read_ofx_transactions(ofx_file))
+        rows = list(read_ofx_transactions("chase_checking", ofx_file))
         assert len(rows) == len(scenario.checking.transactions)
 
     def test_signs_match_ofx_convention(self, scenario, ofx_file):
         """OFX TRNAMT is already signed negative=outflow — must round-trip
         exactly to the scenario amounts, both inflow and outflow."""
-        parsed = sorted((r["posted_on"], r["amount"]) for r in read_ofx_transactions(ofx_file))
+        parsed = sorted(
+            (r["posted_on"], r["amount"]) for r in read_ofx_transactions("chase_checking", ofx_file)
+        )
         expected = sorted((t.posted_on, t.amount) for t in scenario.checking.transactions)
         assert parsed == expected
         amounts = [a for _, a in parsed]
         assert any(a > 0 for a in amounts) and any(a < 0 for a in amounts)
 
     def test_fitid_becomes_external_id(self, ofx_file):
-        rows = list(read_ofx_transactions(ofx_file))
+        rows = list(read_ofx_transactions("chase_checking", ofx_file))
         assert all(r["external_id"] and r["external_id"].startswith("CHK") for r in rows)
 
     def test_malformed_file_raises_ingestion_error(self, tmp_path):
         bad = tmp_path / "bad.ofx"
         bad.write_text("this is not OFX at all", encoding="utf-8")
         with pytest.raises(IngestionError, match=r"bad\.ofx"):
-            list(read_ofx_transactions(bad))
+            list(read_ofx_transactions("chase_checking", bad))
 
     def test_spec_incomplete_file_raises_ingestion_error(self, tmp_path):
         """A file missing a required aggregate (LEDGERBAL) is rejected by the
@@ -94,7 +96,7 @@ class TestReadOfxTransactions:
             encoding="utf-8",
         )
         with pytest.raises(IngestionError, match="OFX"):
-            list(read_ofx_transactions(incomplete))
+            list(read_ofx_transactions("chase_checking", incomplete))
 
 
 class TestRunOfxIngestion:
