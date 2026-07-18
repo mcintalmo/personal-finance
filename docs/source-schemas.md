@@ -210,7 +210,13 @@ ship date.
 Standard format per the OFX spec (SGML-style for 1.x, XML for 2.x); Chase and
 BMO both offer it. Key elements per transaction: `<STMTTRN>` with `<TRNTYPE>`,
 `<DTPOSTED>`, `<TRNAMT>`, `<FITID>` (the source of our `external_id`), `<NAME>`,
-optional `<MEMO>`. Synth should emit OFX 1.02 SGML — the ugliest common case.
+optional `<MEMO>`. Synth emits OFX 1.02 SGML — the ugliest common case —
+including the required `<LEDGERBAL>` aggregate real exports carry.
+
+Parsed by **ofxtools** (both 1.x/2.x/QFX), which enforces the OFX spec: a file
+missing a required aggregate is rejected, so the fixture must be spec-valid.
+`TRNAMT` is already signed (negative = outflow), matching our convention — no
+`sign_convention` needed for OFX. See `personal_finance.ingest.ofx_source`.
 
 ## Costco warehouse receipt (for Phase 5 vision-LLM fixtures)
 

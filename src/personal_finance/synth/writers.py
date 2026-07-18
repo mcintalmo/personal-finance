@@ -11,6 +11,7 @@ Lines are built by hand (not the csv module) because several formats are not
 well-formed CSV; scenario descriptions are comma-free by construction.
 """
 
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -216,8 +217,14 @@ def venmo_csv(txns: Sequence[SynthTransaction]) -> str:
 
 
 def ofx(txns: Sequence[SynthTransaction]) -> str:
-    """Minimal OFX 1.02 SGML statement (the ugliest common case)."""
+    """Spec-valid OFX 1.02 SGML statement (the ugliest common format).
+
+    Includes the required LEDGERBAL aggregate that real bank exports always
+    carry — omitting it produces a file strict parsers (ofxtools) reject, so a
+    faithful fixture must include it.
+    """
     first, last = txns[0], txns[-1]
+    closing_balance = last.balance if last.balance is not None else Decimal("0.00")
     stmttrns = "".join(
         "<STMTTRN>"
         f"<TRNTYPE>{'DEBIT' if t.amount < 0 else 'CREDIT'}"
@@ -239,7 +246,10 @@ def ofx(txns: Sequence[SynthTransaction]) -> str:
         f"<DTSTART>{first.posted_on.strftime('%Y%m%d')}"
         f"<DTEND>{last.posted_on.strftime('%Y%m%d')}\n"
         f"{stmttrns}"
-        "</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>\n"
+        "</BANKTRANLIST>"
+        f"<LEDGERBAL><BALAMT>{closing_balance}"
+        f"<DTASOF>{last.posted_on.strftime('%Y%m%d')}120000</LEDGERBAL>"
+        "</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>\n"
     )
 
 

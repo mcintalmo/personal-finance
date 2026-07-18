@@ -10,6 +10,7 @@ dependencies = [
     "dbt-duckdb>=1.10.1",
     "dlt[parquet]>=1.28.1",
     "duckdb>=1.5.4",
+    "ofxtools>=1.1.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
@@ -96,8 +97,10 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel", "pydantic_settings.BaseS
 [tool.ruff.lint.per-file-ignores]
 # dlt's @dlt.resource decorator eagerly introspects the decorated function's
 # signature (inspect.signature), which evaluates its annotations at import
-# time — these imports must stay real, not TYPE_CHECKING-only.
-"src/personal_finance/ingest/csv_source.py" = ["TC003"]
+# time — annotation imports must stay real, not TYPE_CHECKING-only. TC001/2/3
+# cover first-party / third-party / stdlib typing-only-import moves.
+"src/personal_finance/ingest/csv_source.py" = ["TC001", "TC002", "TC003"]
+"src/personal_finance/ingest/ofx_source.py" = ["TC001", "TC002", "TC003"]
 "tests/**" = [
     "ANN",     # type hints not required in tests
     "S101",    # allow assert statements in tests
