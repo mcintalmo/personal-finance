@@ -8,7 +8,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf synth       generate dummy export + receipt fixtures
     pf init-db     create the warehouse schema and seed the taxonomy
     pf transform   run the dbt medallion build (silver/gold + data tests)
-    pf ingest      (Phase 2 stub)
+    pf ingest      load source export files into the bronze layer
     pf enrich      (Phase 4 stub)
 """
 
@@ -20,7 +20,8 @@ import typer
 
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
-from personal_finance.exceptions import ConfigurationError
+from personal_finance.exceptions import ConfigurationError, IngestionError
+from personal_finance.ingest import bronze_row_count, run_ingestion
 from personal_finance.seed import seed_categories
 from personal_finance.synth import (
     generate_receipts,
@@ -100,12 +101,66 @@ def transform(
 
 
 @app.command()
-def ingest() -> None:
-    """Ingest source exports into the bronze layer (Phase 2 — not implemented)."""
-    typer.echo(
-        "pf ingest is not implemented yet — planned for Phase 2 (see docs/PLAN.md).", err=True
-    )
-    raise typer.Exit(code=2)
+def ingest(
+    files: list[Path] = typer.Argument(..., help="Export file(s) to ingest into bronze."),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        "-s",
+        help="Source config name for every file. If omitted, each file's source "
+        "is inferred from its filename stem (e.g. chase_checking.csv -> chase_checking).",
+    ),
+    config_dir: Path | None = typer.Option(
+        None, help="User config directory (default: Settings.config_dir)."
+    ),
+    bronze_dir: Path | None = typer.Option(
+        None, "--bronze", help="Bronze output directory (default: Settings.data.bronze_path)."
+    ),
+) -> None:
+    """Ingest source export files into the append-only bronze layer.
+
+    Re-ingesting a file (or an overlapping export) is idempotent — rows already
+    landed are skipped, so only genuinely-new rows are reported.
+    """
+    try:
+        config = load_user_config(config_dir)
+    except ConfigurationError as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    sources = {s.name: s for s in config.sources}
+    if source is not None and source not in sources:
+        typer.echo(f"Unknown source {source!r}. Configured sources: {sorted(sources)}", err=True)
+        raise typer.Exit(code=1)
+
+    bronze = bronze_dir or get_settings().data.bronze_path
+
+    total_new = 0
+    for file_path in files:
+        if not file_path.is_file():
+            typer.echo(f"File not found: {file_path}", err=True)
+            raise typer.Exit(code=1)
+        source_name = source or file_path.stem
+        src = sources.get(source_name)
+        if src is None:
+            typer.echo(
+                f"No source config matches {file_path} (looked for {source_name!r}); "
+                f"pass --source. Configured sources: {sorted(sources)}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        before = bronze_row_count(bronze, src.name)
+        try:
+            run_ingestion(src, file_path, bronze)
+        except IngestionError as exc:
+            typer.echo(f"Ingestion failed for {file_path}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        after = bronze_row_count(bronze, src.name)
+        new = after - before
+        total_new += new
+        typer.echo(f"{file_path} -> {src.name}: {new} new row(s) ({after} total)")
+
+    typer.echo(f"Ingested {len(files)} file(s), {total_new} new row(s) into {bronze}")
 
 
 @app.command()

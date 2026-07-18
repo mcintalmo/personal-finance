@@ -62,3 +62,14 @@ def existing_row_hashes(bronze_dir: Path, table_name: str) -> set[str]:
             # this source, so there is nothing to dedup against.
             return set()
     return {row[0] for row in rows}
+
+
+def bronze_row_count(bronze_dir: Path, table_name: str) -> int:
+    """Return how many rows have landed for a source; 0 before the first ingest."""
+    pattern = f"{bronze_dir}/bronze/{table_name}/*.parquet"
+    with duckdb.connect() as conn:
+        try:
+            result = conn.execute(f"select count(*) from read_parquet('{pattern}')").fetchone()
+        except duckdb.IOException:
+            return 0
+    return result[0] if result else 0

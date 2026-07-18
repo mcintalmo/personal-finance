@@ -16,7 +16,11 @@ specifically need the format-typed entry point.
 """
 
 from personal_finance.ingest.csv_source import csv_transactions, read_rows
-from personal_finance.ingest.dedup import compute_row_hash, existing_row_hashes
+from personal_finance.ingest.dedup import (
+    bronze_row_count,
+    compute_row_hash,
+    existing_row_hashes,
+)
 from personal_finance.ingest.ofx_source import ofx_transactions, read_ofx_transactions
 from personal_finance.ingest.pipeline import (
     run_csv_ingestion,
@@ -25,6 +29,7 @@ from personal_finance.ingest.pipeline import (
 )
 
 __all__ = [
+    "bronze_row_count",
     "compute_row_hash",
     "csv_transactions",
     "existing_row_hashes",

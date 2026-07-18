@@ -41,6 +41,7 @@ class DataSettings(BaseModel):
     """
 
     warehouse_path: Path = Path("data/warehouse.duckdb")
+    bronze_path: Path = Path("data/bronze")  # append-only Parquet landing zone
 
 
 class Settings(BaseSettings):

@@ -88,8 +88,163 @@ class TestTransform:
         assert count > 0
 
 
-@pytest.mark.parametrize("command", ["ingest", "enrich"])
-def test_stubs_exit_with_pointer_to_plan(command):
-    result = runner.invoke(app, [command])
+def test_enrich_stub_exits_with_pointer_to_plan():
+    result = runner.invoke(app, ["enrich"])
     assert result.exit_code == 2
     assert "not implemented" in result.output
+
+
+class TestIngest:
+    @pytest.fixture
+    def exports(self, tmp_path):
+        """Synth export files written once for the ingest tests."""
+        from personal_finance.synth import generate_scenario, write_scenario
+
+        out = tmp_path / "exports"
+        write_scenario(generate_scenario(seed=42, months=2), out)
+        return out
+
+    def _bronze_count(self, bronze, table):
+        from personal_finance.ingest import bronze_row_count
+
+        return bronze_row_count(bronze, table)
+
+    def test_ingests_csv_with_explicit_source(self, exports, tmp_path):
+        bronze = tmp_path / "bronze"
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(exports / "chase_checking.csv"),
+                "--source",
+                "chase_checking",
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(bronze),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "new row(s)" in result.output
+        assert self._bronze_count(bronze, "chase_checking") > 0
+
+    def test_infers_source_from_filename(self, exports, tmp_path):
+        bronze = tmp_path / "bronze"
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(exports / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(bronze),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert self._bronze_count(bronze, "chase_checking") > 0
+
+    def test_ingests_ofx_with_explicit_source(self, exports, tmp_path):
+        bronze = tmp_path / "bronze"
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(exports / "ofx.ofx"),
+                "--source",
+                "chase_sapphire",
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(bronze),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert self._bronze_count(bronze, "chase_sapphire") > 0
+
+    def test_reingest_is_idempotent(self, exports, tmp_path):
+        bronze = tmp_path / "bronze"
+        args = [
+            "ingest",
+            str(exports / "chase_checking.csv"),
+            "--config-dir",
+            "config/examples",
+            "--bronze",
+            str(bronze),
+        ]
+        first = runner.invoke(app, args)
+        assert first.exit_code == 0, first.output
+        count_after_first = self._bronze_count(bronze, "chase_checking")
+        second = runner.invoke(app, args)
+        assert second.exit_code == 0, second.output
+        assert "0 new row(s)" in second.output
+        assert self._bronze_count(bronze, "chase_checking") == count_after_first
+
+    def test_unknown_source_exits_nonzero(self, exports, tmp_path):
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(exports / "chase_checking.csv"),
+                "--source",
+                "nope",
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(tmp_path / "bronze"),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Unknown source" in result.output
+
+    def test_uninferable_filename_exits_nonzero(self, exports, tmp_path):
+        # ofx.ofx has no source named "ofx"; without --source it can't be matched.
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(exports / "ofx.ofx"),
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(tmp_path / "bronze"),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "No source config matches" in result.output
+
+    def test_missing_file_exits_nonzero(self, tmp_path):
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "does_not_exist.csv"),
+                "--source",
+                "chase_checking",
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(tmp_path / "bronze"),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "File not found" in result.output
+
+    def test_unparseable_file_exits_nonzero(self, tmp_path):
+        bad = tmp_path / "chase_checking.csv"
+        bad.write_text("not,a,valid,export\nfoo,bar,baz,qux\n", encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(bad),
+                "--source",
+                "chase_checking",
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(tmp_path / "bronze"),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Ingestion failed" in result.output
