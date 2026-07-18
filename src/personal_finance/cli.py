@@ -9,20 +9,25 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf init-db     create the warehouse schema and seed the taxonomy
     pf transform   run the dbt medallion build (silver/gold + data tests)
     pf ingest      load source export files into the bronze layer
+    pf watch       watch a folder and ingest exports as they are dropped in
     pf enrich      (Phase 4 stub)
 """
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import duckdb
 import typer
 
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
-from personal_finance.exceptions import ConfigurationError, IngestionError
-from personal_finance.ingest import bronze_row_count, run_ingestion
+from personal_finance.exceptions import ConfigurationError
+from personal_finance.ingest import IngestOutcome, IngestStatus, ingest_file, watch_folder
 from personal_finance.seed import seed_categories
+
+if TYPE_CHECKING:
+    from watchdog.observers.api import BaseObserver
 from personal_finance.synth import (
     generate_receipts,
     generate_scenario,
@@ -140,27 +145,91 @@ def ingest(
         if not file_path.is_file():
             typer.echo(f"File not found: {file_path}", err=True)
             raise typer.Exit(code=1)
-        source_name = source or file_path.stem
-        src = sources.get(source_name)
-        if src is None:
+        outcome = ingest_file(file_path, sources, bronze, source_name=source)
+        if outcome.status is IngestStatus.UNMATCHED:
             typer.echo(
-                f"No source config matches {file_path} (looked for {source_name!r}); "
+                f"No source config matches {file_path} (looked for {outcome.source!r}); "
                 f"pass --source. Configured sources: {sorted(sources)}",
                 err=True,
             )
             raise typer.Exit(code=1)
-        before = bronze_row_count(bronze, src.name)
-        try:
-            run_ingestion(src, file_path, bronze)
-        except IngestionError as exc:
-            typer.echo(f"Ingestion failed for {file_path}: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-        after = bronze_row_count(bronze, src.name)
-        new = after - before
-        total_new += new
-        typer.echo(f"{file_path} -> {src.name}: {new} new row(s) ({after} total)")
+        if outcome.status is IngestStatus.FAILED:
+            typer.echo(f"Ingestion failed for {file_path}: {outcome.detail}", err=True)
+            raise typer.Exit(code=1)
+        total_new += outcome.new_rows
+        typer.echo(
+            f"{file_path} -> {outcome.source}: {outcome.new_rows} new row(s) "
+            f"({outcome.total_rows} total)"
+        )
 
     typer.echo(f"Ingested {len(files)} file(s), {total_new} new row(s) into {bronze}")
+
+
+def _report_outcome(outcome: IngestOutcome) -> None:
+    """Print a one-line summary of a watched file's ingestion."""
+    if outcome.status is IngestStatus.INGESTED:
+        typer.echo(
+            f"{outcome.file} -> {outcome.source}: {outcome.new_rows} new row(s) "
+            f"({outcome.total_rows} total)"
+        )
+    elif outcome.status is IngestStatus.UNMATCHED:
+        typer.echo(f"{outcome.file}: skipped — {outcome.detail}", err=True)
+    else:  # FAILED
+        typer.echo(f"{outcome.file}: ingestion failed — {outcome.detail}", err=True)
+
+
+def _block_until_interrupt(observer: BaseObserver) -> None:  # pragma: no cover - blocking loop
+    """Block the main thread until Ctrl-C, then stop the observer cleanly."""
+    try:
+        while observer.is_alive():
+            observer.join(timeout=1)
+    except KeyboardInterrupt:
+        typer.echo("Stopping…")
+    finally:
+        observer.stop()
+        observer.join()
+
+
+@app.command()
+def watch(
+    folder: Path = typer.Argument(..., help="Folder to watch for dropped export files."),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        "-s",
+        help="Source config name for every file. If omitted, each file's source "
+        "is inferred from its filename stem.",
+    ),
+    config_dir: Path | None = typer.Option(
+        None, help="User config directory (default: Settings.config_dir)."
+    ),
+    bronze_dir: Path | None = typer.Option(
+        None, "--bronze", help="Bronze output directory (default: Settings.data.bronze_path)."
+    ),
+) -> None:
+    """Watch a folder and ingest export files as they are dropped in.
+
+    Ingests any files already present, then blocks watching for new ones until
+    interrupted (Ctrl-C). Re-drops are idempotent.
+    """
+    if not folder.is_dir():
+        typer.echo(f"Not a directory: {folder}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        config = load_user_config(config_dir)
+    except ConfigurationError as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    sources = {s.name: s for s in config.sources}
+    if source is not None and source not in sources:
+        typer.echo(f"Unknown source {source!r}. Configured sources: {sorted(sources)}", err=True)
+        raise typer.Exit(code=1)
+
+    bronze = bronze_dir or get_settings().data.bronze_path
+    observer = watch_folder(folder, sources, bronze, source_name=source, on_outcome=_report_outcome)
+    typer.echo(f"Watching {folder}/ for exports — Ctrl-C to stop.")
+    _block_until_interrupt(observer)
 
 
 @app.command()

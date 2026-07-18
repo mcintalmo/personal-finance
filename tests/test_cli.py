@@ -22,7 +22,7 @@ def fresh_settings(monkeypatch, tmp_path):
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("synth", "init-db", "transform", "ingest", "enrich"):
+    for command in ("synth", "init-db", "transform", "ingest", "watch", "enrich"):
         assert command in result.output
 
 
@@ -92,6 +92,52 @@ def test_enrich_stub_exits_with_pointer_to_plan():
     result = runner.invoke(app, ["enrich"])
     assert result.exit_code == 2
     assert "not implemented" in result.output
+
+
+class TestWatch:
+    def test_not_a_directory_exits_nonzero(self, tmp_path):
+        result = runner.invoke(
+            app,
+            ["watch", str(tmp_path / "nope"), "--config-dir", "config/examples"],
+        )
+        assert result.exit_code == 1
+        assert "Not a directory" in result.output
+
+    def test_unknown_source_exits_nonzero(self, tmp_path):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        result = runner.invoke(
+            app,
+            ["watch", str(inbox), "--source", "nope", "--config-dir", "config/examples"],
+        )
+        assert result.exit_code == 1
+        assert "Unknown source" in result.output
+
+    def test_starts_watching_then_stops(self, monkeypatch, tmp_path):
+        """Patch the blocking loop so the command returns after starting the
+        observer, exercising the happy path without hanging."""
+        import personal_finance.cli as cli_module
+
+        def stop_immediately(observer):
+            observer.stop()
+            observer.join()
+
+        monkeypatch.setattr(cli_module, "_block_until_interrupt", stop_immediately)
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        result = runner.invoke(
+            app,
+            [
+                "watch",
+                str(inbox),
+                "--config-dir",
+                "config/examples",
+                "--bronze",
+                str(tmp_path / "bronze"),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Watching" in result.output
 
 
 class TestIngest:

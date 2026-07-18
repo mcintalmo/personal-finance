@@ -5,20 +5,31 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 2 — Ingestion
+## Phase 3 — Core cleaning (silver)
 
-> Phase 1 (Foundation) is complete — demo verified 2026-07-12: `pf synth` → fixtures,
-> `pf init-db` → seeded warehouse, `pf transform` → dbt build PASS=11.
+> Phase 1 (Foundation) complete — demo verified 2026-07-12.
+> Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
+> `pf ingest`/`pf watch` → idempotent bronze Parquet (CSV + OFX), source inferred or `--source`.
 
-- [ ] ⏳ IN PROGRESS — Watch-folder ingestion (drop a file, it gets picked up)
+- [ ] ⏳ IN PROGRESS — Silver transactions model: dedup, type normalization, and sign
+      conventions over the bronze union (dbt-duckdb; bronze `row_hash` is the grain)
+- [ ] Merchant descriptor cleaning and normalization (raw string → merchant entity)
+- [ ] Transfer detection: correlate paired movements across accounts (amount negation +
+      date window + account pair) and exclude from spend
+- [ ] dbt data tests on every silver model
 
 ## Backlog (later phases)
 
-See [docs/FEATURES.md](docs/FEATURES.md) — Phases 3–8. Tasks are promoted into this file
+See [docs/FEATURES.md](docs/FEATURES.md) — Phases 4–8. Tasks are promoted into this file
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Watch-folder ingestion: `pf watch FOLDER [--source NAME]` ingests exports as they are
+      dropped in, via watchdog's OS filesystem observer (created/moved events) — sweeps files
+      already present first, then blocks until Ctrl-C. Shared `ingest_file` unifies `pf ingest`
+      and the watcher; idempotency makes re-drops safe. `ingest/watch.py`, `pf watch` (2026-07-18).
+      **Phase 2 complete.**
 - [x] Wire `pf ingest` to the dlt pipelines: `pf ingest FILE... [--source NAME]` lands exports into bronze via `run_ingestion` (dispatches on source.kind). Source is explicit or inferred from the filename stem; reports new-vs-existing row counts so idempotency is visible. Boundary-layer error handling (unknown source / missing file / unparseable → exit 1). Added `DataSettings.bronze_path` (`DATA_BRONZE_PATH`) and `bronze_row_count` helper — `cli.py`, `ingest/dedup.py` (2026-07-18). **Phase 2 ingestion pipeline demoable end-to-end.**
 - [x] Idempotent re-ingestion: every bronze row carries a deterministic `row_hash` (keyed on `external_id` when present, else content `source|posted_on|amount|description_raw`); the pipeline reads a source's already-landed hashes and filters them before appending, so re-dropping the same file — or an overlapping export — adds no duplicates. Bronze stays append-only (never mutated/deleted). Works around dlt filesystem having no merge disposition — `ingest/dedup.py`, `pipeline._run` (2026-07-18)
 - [x] dlt pipeline: OFX/QFX exports into bronze via ofxtools (1.x SGML / 2.x XML / QFX). TRNAMT already signed so no sign_convention; FITID → external_id (idempotency key). `run_ingestion` now dispatches on source.kind; shared pipeline/unwrap logic. Also fixed synth OFX to be spec-valid (added required LEDGERBAL) so the strict parser accepts the fixture — `ingest/ofx_source.py` (2026-07-18)
