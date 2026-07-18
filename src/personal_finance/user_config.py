@@ -114,10 +114,14 @@ class SourceConfig(_ConfigModel):
         if missing:
             msg = f"source {self.name!r}: column_map missing required keys {sorted(missing)}"
             raise ValueError(msg)
-        if not self.has_header and not self.columns:
-            msg = f"source {self.name!r}: has_header=false requires 'columns' (positional names)"
-            raise ValueError(msg)
-        if self.columns:
+        if not self.has_header:
+            if not self.columns:
+                msg = (
+                    f"source {self.name!r}: has_header=false requires 'columns' (positional names)"
+                )
+                raise ValueError(msg)
+            # Only meaningful for headerless sources: with a real header the
+            # column names come from the file, not from `columns`.
             unknown = set(self.column_map.values()) - set(self.columns)
             if unknown:
                 msg = (

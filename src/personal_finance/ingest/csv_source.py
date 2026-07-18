@@ -93,15 +93,23 @@ def read_rows(source: SourceConfig, file_path: Path) -> Iterator[dict[str, str]]
 def csv_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRow]:
     """dlt resource yielding canonical bronze rows for one CSV export file.
 
+    Fail-fast by design: the first unparseable row (bad date, unparsable
+    amount, missing/None configured column, footer/summary line) raises and
+    aborts the whole file, so nothing lands in bronze. Once the pipeline is
+    proven, unparseable rows should instead be routed to a quarantine table
+    and the rest of the file allowed through (see TODO.md).
+
     Raises:
-        IngestionError: If a row cannot be parsed (bad date, unparsable
-            amount, missing configured column).
+        IngestionError: If any row cannot be parsed.
     """
     ingested_at = datetime.now(UTC)
     for raw_row in read_rows(source, file_path):
         try:
             parsed = _parse_row(source, raw_row)
-        except (KeyError, ValueError, InvalidOperation) as exc:
+        # AttributeError/TypeError catch None cell values: csv.DictReader fills
+        # missing fields in a short/ragged row with None, and None.strip() /
+        # Decimal(None) raise those rather than ValueError.
+        except (KeyError, ValueError, InvalidOperation, AttributeError, TypeError) as exc:
             msg = f"{file_path}: failed to parse row {raw_row!r}: {exc}"
             raise IngestionError(msg) from exc
         yield {

@@ -197,6 +197,20 @@ class TestRunCsvIngestion:
         with pytest.raises(IngestionError, match=r"bad\.csv"):
             run_csv_ingestion(source, bad_file, tmp_path / "bronze")
 
+    def test_ragged_row_raises_ingestion_error_not_attribute_error(self, tmp_path):
+        """A short row leaves configured columns as None (DictReader restval);
+        None.strip() must surface as a clean IngestionError, not AttributeError."""
+        source = source_by_name("chase_checking")
+        bad_file = tmp_path / "ragged.csv"
+        # Row is truncated before the Description/Amount columns -> those map to None.
+        bad_file.write_text(
+            "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n"
+            "DEBIT,01/01/2026\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(IngestionError, match=r"ragged\.csv"):
+            run_csv_ingestion(source, bad_file, tmp_path / "bronze")
+
     def test_reingesting_same_file_appends(self, exports, tmp_path):
         """Documents current append-only behaviour — dedup is a later task."""
         source = source_by_name("chase_checking")
@@ -256,3 +270,16 @@ class TestSourceConfigCsvValidation:
     def test_ofx_source_skips_csv_validation(self):
         source = SourceConfig(name="s", kind="ofx", account_name="A", account_type="credit_card")
         assert source.column_map == {}
+
+    def test_header_source_may_list_columns_without_subset_check(self):
+        """With has_header=true, `columns` is not authoritative for names, so
+        column_map may reference header columns absent from `columns`."""
+        source = SourceConfig(
+            name="s",
+            kind="csv",
+            account_name="A",
+            account_type="checking",
+            columns=["ignored"],
+            column_map={"posted_on": "Date", "description_raw": "Desc", "amount": "Amount"},
+        )
+        assert source.column_map["amount"] == "Amount"
