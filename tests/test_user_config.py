@@ -103,7 +103,16 @@ class TestReferentialIntegrity:
             load_user_config(tmp_path)
 
     def test_duplicate_source_names_rejected(self, tmp_path):
-        source = "- name: dup\n  kind: csv\n  account_name: A\n  account_type: checking\n"
+        source = (
+            "- name: dup\n"
+            "  kind: csv\n"
+            "  account_name: A\n"
+            "  account_type: checking\n"
+            "  column_map:\n"
+            "    posted_on: date_col\n"
+            "    amount: amt_col\n"
+            "    description_raw: desc_col\n"
+        )
         write_config(tmp_path, sources=source + source.replace("A", "B"))
         with pytest.raises(ConfigurationError, match="duplicate source names"):
             load_user_config(tmp_path)
