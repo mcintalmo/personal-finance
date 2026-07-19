@@ -1,6 +1,46 @@
 version: 2
 
 models:
+  - name: silver_transactions
+    description: >-
+      Cleaned, deduplicated transactions unioned across every ingested source
+      (one row per logical transaction, keyed by transaction_id = bronze row_hash).
+    columns:
+      - name: transaction_id
+        description: Stable per-transaction id (bronze row_hash); the grain.
+        data_tests: [unique, not_null]
+      - name: source
+        data_tests: [not_null]
+      - name: account_name
+        data_tests: [not_null]
+      - name: account_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - checking
+                  - savings
+                  - credit_card
+                  - cash
+                  - payment_app
+                  - investment
+                  - loan
+                  - other
+      - name: currency
+        data_tests: [not_null]
+      - name: posted_on
+        data_tests: [not_null]
+      - name: amount
+        data_tests: [not_null]
+      - name: flow
+        description: Derived direction — outflow when amount < 0, else inflow.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [inflow, outflow]
+
   - name: silver_categories
     description: Cleaned category taxonomy (one row per category node).
     columns:

@@ -142,11 +142,14 @@ class TestRunCsvIngestion:
         ):
             assert expected in columns
 
-    def test_unconfigured_external_id_omitted_not_nulled(self, exports, tmp_path):
-        """Sources without an external_id column shouldn't get an all-null one."""
+    def test_unconfigured_external_id_is_null(self, exports, tmp_path):
+        """A source without an external_id still gets the (stable) column, with
+        every value null — see test_bronze_always_has_external_id_column."""
         source = source_by_name("chase_checking")
         run_csv_ingestion(source, exports / "chase_checking.csv", tmp_path / "bronze")
-        assert "external_id" not in bronze_columns(tmp_path / "bronze", "chase_checking")
+        columns = bronze_columns(tmp_path / "bronze", "chase_checking")
+        rows = bronze_rows(tmp_path / "bronze", "chase_checking")
+        assert all(row[columns.index("external_id")] is None for row in rows)
 
     def test_external_id_captured_when_configured(self, exports, tmp_path):
         source = source_by_name("venmo")
@@ -222,6 +225,13 @@ class TestRunCsvIngestion:
         run_csv_ingestion(source, file_path, tmp_path / "bronze")
         second_count = len(bronze_rows(tmp_path / "bronze", "chase_checking"))
         assert second_count == first_count
+
+    def test_bronze_always_has_external_id_column(self, exports, tmp_path):
+        """A source with no external_id still lands an ``external_id`` column
+        (all-null) so the silver union across sources never loses it."""
+        source = source_by_name("chase_checking")  # no external_id in column_map
+        run_csv_ingestion(source, exports / "chase_checking.csv", tmp_path / "bronze")
+        assert "external_id" in bronze_columns(tmp_path / "bronze", "chase_checking")
 
 
 class TestSourceConfigCsvValidation:

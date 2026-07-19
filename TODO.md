@@ -11,12 +11,10 @@
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
 > `pf ingest`/`pf watch` → idempotent bronze Parquet (CSV + OFX), source inferred or `--source`.
 
-- [ ] ⏳ IN PROGRESS — Silver transactions model: dedup, type normalization, and sign
-      conventions over the bronze union (dbt-duckdb; bronze `row_hash` is the grain)
-- [ ] Merchant descriptor cleaning and normalization (raw string → merchant entity)
+- [ ] ⏳ IN PROGRESS — Merchant descriptor cleaning and normalization (raw string → merchant entity)
 - [ ] Transfer detection: correlate paired movements across accounts (amount negation +
       date window + account pair) and exclude from spend
-- [ ] dbt data tests on every silver model
+- [ ] dbt data tests on every silver model (silver_transactions covered; extend to future models)
 
 ## Backlog (later phases)
 
@@ -24,6 +22,17 @@ See [docs/FEATURES.md](docs/FEATURES.md) — Phases 4–8. Tasks are promoted in
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
+
+- [x] Silver transactions model: `silver_transactions` unions every ingested source via a
+      config-free `bronze/*/*.parquet` glob (dbt-duckdb external source, `union_by_name`), so a
+      new bank appears automatically. Dedups on `row_hash` (the grain → `transaction_id`),
+      normalizes types (amount→`decimal(18,2)`, description trimmed, currency upper-cased) and
+      surfaces a derived `flow` (inflow/outflow); the signed convention is already uniform from
+      ingest. dbt data tests: unique/not_null on the grain, accepted_values on account_type and
+      flow. Also made bronze's `external_id` a stable (always-present, nullable) column via a dlt
+      column hint so the single-source union never loses it. `pf transform` now wires
+      `DATA_BRONZE_PATH` and guards on "no ingested data" — `transform/models/silver/`, `cli.py`
+      (2026-07-19)
 
 - [x] Watch-folder ingestion: `pf watch FOLDER [--source NAME]` ingests exports as they are
       dropped in, via watchdog's OS filesystem observer (created/moved events) — sweeps files

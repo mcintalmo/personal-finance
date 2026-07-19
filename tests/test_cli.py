@@ -12,8 +12,9 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def fresh_settings(monkeypatch, tmp_path):
-    """Point the warehouse at a temp path and clear the settings cache."""
+    """Point the warehouse and bronze at temp paths and clear the settings cache."""
     monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(tmp_path / "warehouse.duckdb"))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(tmp_path / "bronze"))
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -76,16 +77,39 @@ class TestTransform:
         assert result.exit_code == 1
         assert "pf init-db" in result.output
 
-    @pytest.mark.filterwarnings("ignore")
-    def test_builds_after_init_db(self):
+    def test_requires_ingested_bronze(self):
         init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
         assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["transform"])
+        assert result.exit_code == 1
+        assert "No ingested data" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_builds_after_init_db_and_ingest(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "exports" / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
         result = runner.invoke(app, ["transform"])
         assert result.exit_code == 0, result.output
         assert "dbt build succeeded" in result.output
         with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
-            (count,) = conn.execute("select count(*) from main_gold.gold_category_paths").fetchone()
-        assert count > 0
+            (paths,) = conn.execute("select count(*) from main_gold.gold_category_paths").fetchone()
+            (txns,) = conn.execute(
+                "select count(*) from main_silver.silver_transactions"
+            ).fetchone()
+        assert paths > 0
+        assert txns > 0
 
 
 class TestDeposit:

@@ -71,18 +71,16 @@ def _parse_row(source: SourceConfig, row: dict[str, str]) -> dict[str, object]:
     external_id: str | None = None
     if "external_id" in source.column_map:
         external_id = row[source.column_map["external_id"]].strip() or None
-    parsed: dict[str, object] = {
+    # external_id is always emitted (None when the source has none) so bronze
+    # has a stable schema across sources; the resource's column hint keeps the
+    # column even when every value is null. See csv_transactions.
+    return {
         "posted_on": posted_on,
         "amount": amount,
         "description_raw": description_raw,
+        "external_id": external_id,
         "row_hash": compute_row_hash(source.name, posted_on, amount, description_raw, external_id),
     }
-    if "external_id" in source.column_map:
-        # Omit the key entirely when unconfigured, rather than yielding None,
-        # so dlt doesn't warn about being unable to infer a column's type
-        # from an always-null field.
-        parsed["external_id"] = external_id
-    return parsed
 
 
 def read_rows(source: SourceConfig, file_path: Path) -> Iterator[dict[str, str]]:
@@ -94,7 +92,15 @@ def read_rows(source: SourceConfig, file_path: Path) -> Iterator[dict[str, str]]
         yield from csv.DictReader(handle, fieldnames=fieldnames)
 
 
-@dlt.resource(name="transactions", write_disposition="append")
+@dlt.resource(
+    name="transactions",
+    write_disposition="append",
+    # Pin external_id to text so the column is always present in bronze even
+    # when a source has no ids (all-null) — dlt otherwise drops an untyped
+    # all-null column, leaving silver's union without the column. See
+    # docs/source-schemas.md and ingest/dedup.py.
+    columns={"external_id": {"data_type": "text", "nullable": True}},
+)
 def csv_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRow]:
     """dlt resource yielding canonical bronze rows for one CSV export file.
 

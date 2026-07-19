@@ -95,11 +95,19 @@ def transform(
     ),
 ) -> None:
     """Run the dbt medallion build: silver/gold models plus data tests."""
-    warehouse = get_settings().data.warehouse_path
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
     if not warehouse.exists():
         typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
         raise typer.Exit(code=1)
+    bronze = settings.data.bronze_path
+    if not any((bronze / "bronze").glob("*/*.parquet")):
+        typer.echo(
+            f"No ingested data under {bronze} — run `pf ingest` (or `pf watch`) first.", err=True
+        )
+        raise typer.Exit(code=1)
     os.environ.setdefault("DATA_WAREHOUSE_PATH", str(warehouse))
+    os.environ.setdefault("DATA_BRONZE_PATH", str(bronze))
 
     from dbt.cli.main import dbtRunner  # slow import; deferred to this command
 
