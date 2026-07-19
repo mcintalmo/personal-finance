@@ -1,5 +1,6 @@
 """Run a source's dlt resource into the Parquet-backed bronze layer."""
 
+import threading
 from typing import TYPE_CHECKING
 
 import dlt
@@ -19,6 +20,15 @@ if TYPE_CHECKING:
 
     from personal_finance.user_config import SourceConfig
 
+# Ingestion is serialized process-wide. dlt keys its pipeline working directory
+# by pipeline_name, and our dedup reads a source's existing hashes before
+# appending — so two ingests running at once (e.g. the folder watcher's initial
+# sweep on the main thread overlapping an event on the observer thread) would
+# collide on that directory and each read stale hashes, breaking idempotency.
+# For a local single-user tool, serializing all ingestion is simplest and
+# correct; throughput is not a concern.
+_INGEST_LOCK = threading.Lock()
+
 
 def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadInfo:
     """Load one resource into ``bronze_dir/bronze/<source.name>/`` as Parquet.
@@ -28,13 +38,19 @@ def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadI
     exists in this source's bronze table. Re-ingesting the same file — or a
     later export whose date range overlaps an earlier one — therefore adds no
     duplicates, while genuinely-new rows still land. See ``dedup`` for how the
-    hash is keyed.
+    hash is keyed. The whole read-then-append is held under ``_INGEST_LOCK`` so
+    concurrent ingests can't interleave.
 
     Any IngestionError raised inside the resource is wrapped by dlt in
     PipelineStepFailed/ResourceExtractionError; this unwraps that chain so
     callers only ever see our exception type, per the exception-boundary
     convention.
     """
+    with _INGEST_LOCK:
+        return _run_locked(source, resource, bronze_dir)
+
+
+def _run_locked(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadInfo:
     seen = existing_row_hashes(bronze_dir, source.name)
     if seen:
         resource.add_filter(lambda row: row["row_hash"] not in seen)
@@ -42,6 +58,10 @@ def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadI
         pipeline_name=f"bronze_{source.name}",
         destination=filesystem(bucket_url=str(bronze_dir)),
         dataset_name="bronze",
+        # Keep dlt's working state alongside the data, not in the user's home
+        # (~/.dlt) — isolates state per warehouse and avoids cross-run
+        # collisions on a globally-shared pipeline directory.
+        pipelines_dir=str(bronze_dir / ".dlt"),
     )
     try:
         return pipeline.run(resource, table_name=source.name, loader_file_format="parquet")

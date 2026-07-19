@@ -134,3 +134,32 @@ class TestReingestionIsIdempotent:
         run_ingestion(source, novel, bronze)
         after = bronze_row_count(bronze, "chase_checking")
         assert after == before + 1
+
+
+class TestConcurrentIngestion:
+    def test_same_source_concurrently_no_crash_no_duplicates(self, scenario, exports, tmp_path):
+        """Ingestion is serialized, so overlapping runs for one source (as the
+        folder watcher's sweep and observer thread can produce) neither collide
+        on dlt's pipeline dir nor read stale dedup hashes and duplicate rows."""
+        import threading
+
+        source = source_by_name("chase_checking")
+        bronze = tmp_path / "bronze"
+        file_path = exports / "chase_checking.csv"
+        errors: list[BaseException] = []
+
+        def ingest() -> None:
+            try:
+                run_ingestion(source, file_path, bronze)
+            except BaseException as exc:  # surface any thread error to the test
+                errors.append(exc)
+
+        threads = [threading.Thread(target=ingest) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"concurrent ingestion raised: {errors}"
+        # Idempotent under concurrency: exactly one file's worth of rows.
+        assert bronze_row_count(bronze, "chase_checking") == len(scenario.checking.transactions)

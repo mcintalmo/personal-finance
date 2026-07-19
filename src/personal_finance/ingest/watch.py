@@ -192,7 +192,14 @@ def watch_folder(
     """
 
     def handle(path: Path) -> None:
-        outcome = ingest_file(path, sources, bronze_dir, source_name=source_name)
+        # Runs on the observer thread. A single bad event must never kill the
+        # watcher, so catch anything unexpected (ingest_file already turns parse
+        # failures into a FAILED outcome; this guards the truly unforeseen).
+        try:
+            outcome = ingest_file(path, sources, bronze_dir, source_name=source_name)
+        except Exception:
+            logger.exception("unexpected error ingesting %s; watcher continues", path)
+            return
         logger.info("ingested %s -> %s (%d new)", path, outcome.source, outcome.new_rows)
         if on_outcome is not None:
             on_outcome(outcome)
