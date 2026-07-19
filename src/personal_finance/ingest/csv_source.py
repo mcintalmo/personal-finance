@@ -20,6 +20,7 @@ from pathlib import Path
 import dlt
 
 from personal_finance.exceptions import IngestionError
+from personal_finance.ingest.dedup import compute_row_hash
 from personal_finance.user_config import SignConvention, SourceConfig
 
 BronzeRow = dict[str, object]
@@ -67,16 +68,20 @@ def _parse_row(source: SourceConfig, row: dict[str, str]) -> dict[str, object]:
         amount = _parse_amount_signed(row[source.column_map["amount"]])
         if source.sign_convention == SignConvention.INVERTED:
             amount = -amount
+    external_id: str | None = None
+    if "external_id" in source.column_map:
+        external_id = row[source.column_map["external_id"]].strip() or None
     parsed: dict[str, object] = {
         "posted_on": posted_on,
         "amount": amount,
         "description_raw": description_raw,
+        "row_hash": compute_row_hash(source.name, posted_on, amount, description_raw, external_id),
     }
     if "external_id" in source.column_map:
         # Omit the key entirely when unconfigured, rather than yielding None,
         # so dlt doesn't warn about being unable to infer a column's type
         # from an always-null field.
-        parsed["external_id"] = row[source.column_map["external_id"]].strip() or None
+        parsed["external_id"] = external_id
     return parsed
 
 
