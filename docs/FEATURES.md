@@ -19,10 +19,10 @@
 - [ ] Idempotent re-ingestion (same file twice ≠ duplicate transactions)
 
 ## 3. Core cleaning (silver)
-- [ ] Deduplication, type normalization, sign conventions
-- [ ] Merchant descriptor cleaning and normalization (raw string → merchant entity)
-- [ ] Transfer detection: correlate paired movements across accounts (amount negation + date window + account pair) and exclude from spend
-- [ ] dbt data tests on every silver model
+- [x] Deduplication, type normalization, sign conventions
+- [x] Merchant descriptor cleaning and normalization (raw string → merchant entity)
+- [x] Transfer detection: correlate paired movements across accounts (amount negation + date window + account pair) and exclude from spend
+- [x] dbt data tests on every silver model
 
 ## 4. Categorization
 - [ ] Rules engine: user-editable YAML merchant/pattern → category rules

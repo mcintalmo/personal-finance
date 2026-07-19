@@ -5,26 +5,34 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 3 — Core cleaning (silver)
+## Phase 4 — Categorization
 
 > Phase 1 (Foundation) complete — demo verified 2026-07-12.
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
 > `pf ingest`/`pf watch` → idempotent bronze Parquet (CSV + OFX), source inferred or `--source`.
+> Phase 3 (Core cleaning) complete — demo verified 2026-07-19: `pf transform` → silver
+> transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
+> dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
-      resolve city-only suffixes and brand variants the generic macro can't (follow-up to
-      merchant cleaning)
-- [ ] Merchant normalization — leverage existing data, don't hand-roll: evaluate Python
-      libraries (e.g. cleanco) and public merchant/brand datasets (MCC lists, OpenCorporates,
-      merchant-name normalization corpora) to replace/augment the regex macro
-- [ ] Merchant resolution for the outlier tail: fuzzy match / semantic (embedding) search /
-      local-LLM classifier to map descriptors the deterministic cleaner can't resolve to a
-      canonical merchant — feeds the Phase 4 categorizer
+- [ ] ⏳ IN PROGRESS — Rules engine: user-editable YAML merchant/pattern → category rules
+      (rules.yaml already exists — apply it over silver_transactions.merchant_name)
 
 ## Backlog (later phases)
 
 See [docs/FEATURES.md](docs/FEATURES.md) — Phases 4–8. Tasks are promoted into this file
 one phase at a time when the previous phase's demo is complete.
+
+**Phase 3 merchant follow-ups** (deferred — evaluate existing tooling before hand-rolling more):
+
+- [ ] Merchant normalization — leverage existing data, don't hand-roll: evaluate Python
+      libraries (e.g. cleanco) and public merchant/brand datasets (MCC lists, OpenCorporates,
+      merchant-name normalization corpora) to replace/augment the regex macro. **Do this before**
+      the config-driven aliases below.
+- [ ] Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
+      resolve city-only suffixes and brand variants the generic macro can't
+- [ ] Merchant resolution for the outlier tail: fuzzy match / semantic (embedding) search /
+      local-LLM classifier to map descriptors the deterministic cleaner can't resolve to a
+      canonical merchant — feeds the Phase 4 categorizer
 
 ## Done
 
