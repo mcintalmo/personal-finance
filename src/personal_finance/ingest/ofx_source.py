@@ -48,6 +48,10 @@ def read_ofx_transactions(source_name: str, file_path: Path) -> Iterator[dict[st
         raise IngestionError(msg) from exc
 
     for statement in ofx.statements:
+        # FITID is unique only within an account; scope the hash by the
+        # statement's account id so two statements bundled in one file can't
+        # collide on a shared id.
+        account_id = getattr(statement.account, "acctid", None)
         for txn in statement.transactions:
             name = (txn.name or "").strip()
             memo = (txn.memo or "").strip()
@@ -62,7 +66,7 @@ def read_ofx_transactions(source_name: str, file_path: Path) -> Iterator[dict[st
                 "description_raw": description_raw,
                 "external_id": external_id,
                 "row_hash": compute_row_hash(
-                    source_name, posted_on, txn.trnamt, description_raw, external_id
+                    source_name, posted_on, txn.trnamt, description_raw, external_id, account_id
                 ),
             }
 

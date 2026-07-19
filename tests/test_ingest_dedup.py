@@ -62,6 +62,25 @@ class TestComputeRowHash:
         b = compute_row_hash("amex", date(2026, 1, 1), Decimal("-1.00"), "COFFEE", "FIT1")
         assert a != b
 
+    def test_account_id_scopes_the_hash(self):
+        """A FITID reused across two accounts in one file must not collide."""
+        checking = compute_row_hash(
+            "bank", date(2026, 1, 1), Decimal("-1.00"), "COFFEE", "1", account_id="CHK"
+        )
+        savings = compute_row_hash(
+            "bank", date(2026, 1, 1), Decimal("-1.00"), "COFFEE", "1", account_id="SAV"
+        )
+        assert checking != savings
+
+    def test_account_id_default_preserves_unscoped_key(self):
+        """Omitting account_id (the CSV path) keeps the original key, so
+        existing CSV hashes are unchanged."""
+        with_default = compute_row_hash("s", date(2026, 1, 1), Decimal("-1.00"), "X", "FIT1")
+        explicit_none = compute_row_hash(
+            "s", date(2026, 1, 1), Decimal("-1.00"), "X", "FIT1", account_id=None
+        )
+        assert with_default == explicit_none
+
 
 class TestExistingRowHashes:
     def test_empty_before_any_ingest(self, tmp_path):

@@ -22,7 +22,7 @@ def fresh_settings(monkeypatch, tmp_path):
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("synth", "init-db", "transform", "ingest", "watch", "enrich"):
+    for command in ("synth", "init-db", "transform", "ingest", "watch", "deposit", "enrich"):
         assert command in result.output
 
 
@@ -86,6 +86,24 @@ class TestTransform:
         with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
             (count,) = conn.execute("select count(*) from main_gold.gold_category_paths").fetchone()
         assert count > 0
+
+
+class TestDeposit:
+    def test_places_file_into_folder(self, tmp_path):
+        src = tmp_path / "download.csv"
+        src.write_text("a,b\n1,2\n", encoding="utf-8")
+        inbox = tmp_path / "inbox"
+        result = runner.invoke(app, ["deposit", str(src), str(inbox)])
+        assert result.exit_code == 0, result.output
+        assert (inbox / "download.csv").is_file()
+        assert "Deposited" in result.output
+
+    def test_missing_source_exits_nonzero(self, tmp_path):
+        result = runner.invoke(
+            app, ["deposit", str(tmp_path / "nope.csv"), str(tmp_path / "inbox")]
+        )
+        assert result.exit_code == 1
+        assert "File not found" in result.output
 
 
 def test_enrich_stub_exits_with_pointer_to_plan():

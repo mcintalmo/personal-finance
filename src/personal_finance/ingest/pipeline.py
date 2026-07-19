@@ -46,11 +46,17 @@ def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadI
     try:
         return pipeline.run(resource, table_name=source.name, loader_file_format="parquet")
     except Exception as exc:
+        # dlt wraps resource errors in PipelineStepFailed/ResourceExtractionError;
+        # recover our IngestionError from the chain so callers only see it.
+        # Follow both explicit (__cause__) and implicit (__context__) chaining,
+        # guarding against cycles.
         cause: BaseException | None = exc
-        while cause is not None:
+        seen: set[int] = set()
+        while cause is not None and id(cause) not in seen:
             if isinstance(cause, IngestionError):
                 raise cause from None
-            cause = cause.__cause__
+            seen.add(id(cause))
+            cause = cause.__cause__ or cause.__context__
         raise
 
 

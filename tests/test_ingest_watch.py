@@ -15,6 +15,7 @@ from watchdog.events import (
 from personal_finance.ingest.watch import (
     IngestStatus,
     _ExportEventHandler,
+    deposit_file,
     ingest_file,
     sweep_folder,
     watch_folder,
@@ -115,6 +116,30 @@ class TestSweepFolder:
         assert outcomes[0].status is IngestStatus.UNMATCHED
 
 
+class TestDepositFile:
+    def test_places_complete_file_and_cleans_staging(self, exports, tmp_path):
+        inbox = tmp_path / "inbox"
+        dest = deposit_file(exports / "chase_checking.csv", inbox)
+        assert dest == inbox / "chase_checking.csv"
+        assert dest.read_text() == (exports / "chase_checking.csv").read_text()
+        # No .part staging file is left behind.
+        assert list(inbox.glob("*.part")) == []
+
+    def test_creates_folder_and_honours_name_override(self, exports, tmp_path):
+        inbox = tmp_path / "nested" / "inbox"
+        dest = deposit_file(exports / "chase_checking.csv", inbox, name="renamed.csv")
+        assert dest == inbox / "renamed.csv"
+        assert dest.is_file()
+
+    def test_staging_name_is_ignored_by_export_patterns(self):
+        # The .part staging file must not match the watcher's patterns, so the
+        # watcher ignores it until the atomic rename completes.
+        from personal_finance.ingest.watch import DEFAULT_PATTERNS, _matches
+
+        assert _matches("chase_checking.csv.part", DEFAULT_PATTERNS) is False
+        assert _matches("chase_checking.csv", DEFAULT_PATTERNS) is True
+
+
 class TestExportEventHandler:
     def test_on_created_matching_file_invokes_callback(self, tmp_path):
         seen: list[Path] = []
@@ -160,8 +185,12 @@ class TestWatchFolder:
             observer.stop()
             observer.join()
 
-    def test_dropped_file_is_ingested(self, exports, tmp_path):
-        """End-to-end: start the observer, drop a file, and confirm it lands."""
+    def test_deposited_file_is_ingested(self, exports, tmp_path):
+        """End-to-end: start the observer, deposit a file, and confirm it lands.
+
+        Uses the supported delivery path (deposit_file → atomic rename) so the
+        observer only ever sees a complete file.
+        """
         inbox = tmp_path / "inbox"
         inbox.mkdir()
         bronze = tmp_path / "bronze"
@@ -176,13 +205,9 @@ class TestWatchFolder:
             inbox, sources_map(), bronze, on_outcome=record, sweep_existing=False
         )
         try:
-            # Move a file in atomically (rename) so the observer sees a
-            # complete file rather than a partial write.
-            staged = tmp_path / "chase_checking.csv"
-            shutil.copy(exports / "chase_checking.csv", staged)
-            staged.rename(inbox / "chase_checking.csv")
+            deposit_file(exports / "chase_checking.csv", inbox)
 
-            assert got.wait(timeout=15), "watcher did not ingest the dropped file in time"
+            assert got.wait(timeout=15), "watcher did not ingest the deposited file in time"
             assert any(
                 o.source == "chase_checking" and o.status is IngestStatus.INGESTED for o in outcomes
             )

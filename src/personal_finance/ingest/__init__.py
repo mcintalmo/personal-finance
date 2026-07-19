@@ -33,6 +33,7 @@ from personal_finance.ingest.pipeline import (
 from personal_finance.ingest.watch import (
     IngestOutcome,
     IngestStatus,
+    deposit_file,
     ingest_file,
     sweep_folder,
     watch_folder,
@@ -44,6 +45,7 @@ __all__ = [
     "bronze_row_count",
     "compute_row_hash",
     "csv_transactions",
+    "deposit_file",
     "existing_row_hashes",
     "ingest_file",
     "ofx_transactions",

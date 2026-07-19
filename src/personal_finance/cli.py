@@ -10,6 +10,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf transform   run the dbt medallion build (silver/gold + data tests)
     pf ingest      load source export files into the bronze layer
     pf watch       watch a folder and ingest exports as they are dropped in
+    pf deposit     atomically place a completed file into a watched folder
     pf enrich      (Phase 4 stub)
 """
 
@@ -23,7 +24,13 @@ import typer
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
 from personal_finance.exceptions import ConfigurationError
-from personal_finance.ingest import IngestOutcome, IngestStatus, ingest_file, watch_folder
+from personal_finance.ingest import (
+    IngestOutcome,
+    IngestStatus,
+    deposit_file,
+    ingest_file,
+    watch_folder,
+)
 from personal_finance.seed import seed_categories
 
 if TYPE_CHECKING:
@@ -230,6 +237,28 @@ def watch(
     observer = watch_folder(folder, sources, bronze, source_name=source, on_outcome=_report_outcome)
     typer.echo(f"Watching {folder}/ for exports — Ctrl-C to stop.")
     _block_until_interrupt(observer)
+
+
+@app.command()
+def deposit(
+    src: Path = typer.Argument(..., help="Completed file to place into the watched folder."),
+    folder: Path = typer.Argument(..., help="Watched folder to deposit into."),
+    name: str | None = typer.Option(
+        None, help="Rename the file on arrival (default: keep its current name)."
+    ),
+) -> None:
+    """Atomically place a completed file into a watched folder.
+
+    Use as the last step of a download pipeline so that `pf watch` only ever
+    sees complete files: download into a staging area, then `pf deposit` the
+    finished file into the watched folder (a `.part` staging file makes the
+    final appearance atomic).
+    """
+    if not src.is_file():
+        typer.echo(f"File not found: {src}", err=True)
+        raise typer.Exit(code=1)
+    dest = deposit_file(src, folder, name=name)
+    typer.echo(f"Deposited {src} -> {dest}")
 
 
 @app.command()

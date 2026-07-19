@@ -3,18 +3,29 @@
 The single-file entry point :func:`ingest_file` is shared by ``pf ingest`` and
 the watcher, so both resolve a source and report row counts identically.
 :func:`watch_folder` wires watchdog's OS filesystem observer to it: a file
-moved or created in the folder is ingested as it appears.
+that appears in the folder is ingested.
+
+**Deliver files by atomic rename.** A watcher can't tell a completed file from
+one still being written — an ``on_created`` event fires the instant a file
+appears, before an in-place writer finishes, so ingesting then would silently
+land 0 or a partial set of rows. The safe contract is therefore: write the file
+somewhere else, then atomically rename it into the watched folder. After the
+rename the file is instantly complete, so whichever event fires (a move from
+outside the tree surfaces as ``on_created``; a move from within it as
+``on_moved`` — and which is which is platform-dependent) reads a whole file.
+:func:`deposit_file` (and ``pf deposit``) do exactly this, staging through a
+``.part`` name that the watcher's patterns ignore. Writing the final filename
+in place (e.g. ``curl -o inbox/x.csv``) is unsupported.
 
 Because ingestion is idempotent (see :mod:`personal_finance.ingest.dedup`),
-re-observing a file — or sweeping a folder that overlaps an earlier one — never
-duplicates rows. Files should be written fully before landing (or moved in
-atomically); a file still being written may fail to parse and simply won't land
-until it is complete.
+re-depositing a file — or sweeping a folder that overlaps an earlier one —
+never duplicates rows.
 """
 
 import fnmatch
 import logging
 import os
+import shutil
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -38,6 +49,27 @@ logger = logging.getLogger(__name__)
 
 # Export formats we recognise when sweeping/watching a folder.
 DEFAULT_PATTERNS: tuple[str, ...] = ("*.csv", "*.ofx", "*.qfx")
+
+# Suffix for the in-flight staging file used by deposit_file. It must not match
+# DEFAULT_PATTERNS so the watcher ignores it until the atomic rename completes.
+_STAGING_SUFFIX = ".part"
+
+
+def deposit_file(src_file: Path, folder: Path, *, name: str | None = None) -> Path:
+    """Atomically place a completed file into a watched folder.
+
+    Copies ``src_file`` to a temporary ``.part`` name inside ``folder`` (which
+    the watcher's patterns ignore), then atomically renames it to its final
+    name, so a watcher only ever observes a complete file. Use this as the last
+    step of a download pipeline: download into a staging area, then deposit into
+    the watched folder. Returns the final path.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / (name or src_file.name)
+    staging = folder / f"{dest.name}{_STAGING_SUFFIX}"
+    shutil.copy2(src_file, staging)
+    staging.replace(dest)  # atomic within one directory/filesystem
+    return dest
 
 
 class IngestStatus(StrEnum):
@@ -123,8 +155,9 @@ class _ExportEventHandler(FileSystemEventHandler):
         self._maybe_ingest(event.is_directory, event.src_path)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        # A rename/move into the folder — e.g. a downloader writing `.part`
-        # then renaming to `.csv`, or the user running `mv`.
+        # An atomic rename whose source is inside the watched tree (e.g.
+        # deposit_file's `.part` -> final rename). A move from *outside* the
+        # tree instead surfaces as on_created — so both handlers are needed.
         self._maybe_ingest(event.is_directory, event.dest_path)
 
     def _maybe_ingest(self, is_directory: bool, raw_path: str | bytes) -> None:
@@ -147,11 +180,15 @@ def watch_folder(
 ) -> BaseObserver:
     """Start watching ``folder`` and ingest export files as they appear.
 
-    Ingests any matching files already present first (unless
-    ``sweep_existing`` is False), then returns a started watchdog observer that
-    ingests newly created/moved files. The caller owns the observer's lifecycle
-    (``observer.stop(); observer.join()``). ``on_outcome`` is called for every
-    file processed, by the sweep and by the observer thread.
+    Returns a started watchdog observer that ingests newly created/moved files;
+    the caller owns its lifecycle (``observer.stop(); observer.join()``). Any
+    matching files already present are then ingested (unless ``sweep_existing``
+    is False). ``on_outcome`` is called for every file processed, by the sweep
+    and by the observer thread.
+
+    The observer is started *before* the sweep so a file dropped during the
+    sweep still fires an event rather than falling into the gap; idempotency
+    makes the harmless overlap (caught by both) a no-op on the second pass.
     """
 
     def handle(path: Path) -> None:
@@ -160,6 +197,11 @@ def watch_folder(
         if on_outcome is not None:
             on_outcome(outcome)
 
+    handler = _ExportEventHandler(patterns, handle)
+    observer = Observer()
+    observer.schedule(handler, str(folder), recursive=False)
+    observer.start()
+
     if sweep_existing:
         for outcome in sweep_folder(
             folder, sources, bronze_dir, source_name=source_name, patterns=patterns
@@ -167,8 +209,4 @@ def watch_folder(
             if on_outcome is not None:
                 on_outcome(outcome)
 
-    handler = _ExportEventHandler(patterns, handle)
-    observer = Observer()
-    observer.schedule(handler, str(folder), recursive=False)
-    observer.start()
     return observer
