@@ -57,7 +57,9 @@ def _parse_amount_unsigned(raw: str) -> Decimal:
     return abs(Decimal(stripped)) if stripped else Decimal("0")
 
 
-def _parse_row(source: SourceConfig, row: dict[str, str]) -> dict[str, object]:
+def _parse_row(
+    source: SourceConfig, row: dict[str, str], occurrence_counts: dict[tuple[object, ...], int]
+) -> dict[str, object]:
     posted_on = _parse_date(row[source.column_map["posted_on"]], source.date_format)
     description_raw = row[source.column_map["description_raw"]].strip()
     if source.sign_convention == SignConvention.DEBIT_CREDIT:
@@ -71,6 +73,12 @@ def _parse_row(source: SourceConfig, row: dict[str, str]) -> dict[str, object]:
     external_id: str | None = None
     if "external_id" in source.column_map:
         external_id = row[source.column_map["external_id"]].strip() or None
+    # occurrence: the Nth row so far in this file sharing the same content key,
+    # so two genuinely different same-day/amount/description transactions (no
+    # external_id to disambiguate) don't hash identically. See dedup.py.
+    content_key = (posted_on, amount, description_raw)
+    occurrence = occurrence_counts.get(content_key, 0)
+    occurrence_counts[content_key] = occurrence + 1
     # external_id is always emitted (None when the source has none) so bronze
     # has a stable schema across sources; the resource's column hint keeps the
     # column even when every value is null. See csv_transactions.
@@ -79,7 +87,9 @@ def _parse_row(source: SourceConfig, row: dict[str, str]) -> dict[str, object]:
         "amount": amount,
         "description_raw": description_raw,
         "external_id": external_id,
-        "row_hash": compute_row_hash(source.name, posted_on, amount, description_raw, external_id),
+        "row_hash": compute_row_hash(
+            source.name, posted_on, amount, description_raw, external_id, occurrence=occurrence
+        ),
     }
 
 
@@ -114,9 +124,10 @@ def csv_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRo
         IngestionError: If any row cannot be parsed.
     """
     ingested_at = datetime.now(UTC)
+    occurrence_counts: dict[tuple[object, ...], int] = {}
     for raw_row in read_rows(source, file_path):
         try:
-            parsed = _parse_row(source, raw_row)
+            parsed = _parse_row(source, raw_row, occurrence_counts)
         # AttributeError/TypeError catch None cell values: csv.DictReader fills
         # missing fields in a short/ragged row with None, and None.strip() /
         # Decimal(None) raise those rather than ValueError.

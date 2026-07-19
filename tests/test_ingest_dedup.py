@@ -62,6 +62,27 @@ class TestComputeRowHash:
         b = compute_row_hash("amex", date(2026, 1, 1), Decimal("-1.00"), "COFFEE", "FIT1")
         assert a != b
 
+    def test_occurrence_distinguishes_repeated_content(self):
+        """Two genuinely different same-day/amount/description transactions
+        (no external_id) must not hash identically — the Nth occurrence within
+        a batch is folded into the content key."""
+        first = compute_row_hash(
+            "chase", date(2026, 1, 5), Decimal("-12.00"), "VENDING MACHINE", None, occurrence=0
+        )
+        second = compute_row_hash(
+            "chase", date(2026, 1, 5), Decimal("-12.00"), "VENDING MACHINE", None, occurrence=1
+        )
+        assert first != second
+
+    def test_occurrence_default_preserves_existing_hashes(self):
+        """Omitting occurrence (the external_id path, and any pre-existing
+        caller) keeps the original content-key hash unchanged."""
+        with_default = compute_row_hash("chase", date(2026, 1, 5), Decimal("-1.00"), "X", None)
+        explicit_zero = compute_row_hash(
+            "chase", date(2026, 1, 5), Decimal("-1.00"), "X", None, occurrence=0
+        )
+        assert with_default == explicit_zero
+
     def test_account_id_scopes_the_hash(self):
         """A FITID reused across two accounts in one file must not collide."""
         checking = compute_row_hash(
@@ -134,6 +155,27 @@ class TestReingestionIsIdempotent:
         run_ingestion(source, novel, bronze)
         after = bronze_row_count(bronze, "chase_checking")
         assert after == before + 1
+
+    def test_within_file_duplicate_content_both_land(self, tmp_path):
+        """Two genuinely different transactions that happen to share date,
+        amount, and description (no external_id to disambiguate — e.g. two
+        identical vending-machine purchases the same day) must both land in
+        bronze as distinct rows, not collapse to one via a shared row_hash."""
+        source = source_by_name("chase_checking")
+        bronze = tmp_path / "bronze"
+        header = "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n"
+        dup_row = "DEBIT,01/05/2026,VENDING MACHINE,-2.00,DEBIT,0.00,\n"
+        csv_file = tmp_path / "dupes.csv"
+        csv_file.write_text(header + dup_row + dup_row, encoding="utf-8")
+
+        run_ingestion(source, csv_file, bronze)
+
+        with duckdb.connect() as conn:
+            rows = conn.execute(
+                f"select row_hash from read_parquet('{bronze}/bronze/chase_checking/*.parquet')"
+            ).fetchall()
+        assert len(rows) == 2
+        assert len({r[0] for r in rows}) == 2  # distinct row_hash per row
 
 
 class TestConcurrentIngestion:

@@ -28,10 +28,16 @@ account_patterns as (
     select
         account_name,
         array_to_string(
-            list_filter(
-                string_split(upper(account_name), ' '),
-                x -> length(x) >= 4
-                and x not in ('CHECKING', 'SAVINGS', 'ACCOUNT', 'CARD', 'CREDIT', 'DEBIT', 'BANK')
+            list_transform(
+                list_filter(
+                    string_split(upper(account_name), ' '),
+                    x -> length(x) >= 4
+                    and x not in ('CHECKING', 'SAVINGS', 'ACCOUNT', 'CARD', 'CREDIT', 'DEBIT', 'BANK')
+                ),
+                -- account_name is free-text from user config, not controlled —
+                -- escape before it's spliced into a regex (a name like
+                -- "401(k) Rollover" would otherwise break/misparse the pattern).
+                x -> regexp_escape(x)
             ),
             '|'
         ) as name_pattern
