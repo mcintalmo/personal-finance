@@ -86,6 +86,16 @@ models:
         data_tests: [not_null]
       - name: amount
         data_tests: [not_null]
+      - name: name_match
+        description: True when a leg's descriptor names the counterparty account.
+        data_tests: [not_null]
+      - name: confidence
+        description: high when name-corroborated, else medium (amount + date only).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [high, medium]
 
   - name: silver_merchants
     description: >-

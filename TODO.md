@@ -31,8 +31,11 @@ one phase at a time when the previous phase's demo is complete.
 - [x] Transfer detection: `silver_transfers` correlates paired inter-account movements — an
       outflow and inflow that negate (equal magnitude, opposite sign), same currency, different
       accounts, within `transfer_window_days` (dbt var, default 3). Matched 1:1 via mutually-best
-      ranking so a repeated amount can't double-count. `silver_transactions` gains `is_transfer`
-      (both legs flagged) so spend/income can exclude money moved between your own accounts.
+      ranking so a repeated amount can't double-count. Corroborated by a name signal — when a
+      leg's descriptor names the counterparty account (checking "VENMO CASHOUT" ↔ the Venmo
+      account), `name_match`/`confidence=high` and the pair wins ranking ties (amount+date-only
+      pairs are `medium`). `silver_transactions` gains `is_transfer` (both legs flagged) so
+      spend/income can exclude money moved between your own accounts.
       Cleanly split `stg_transactions` (ephemeral grain) → `silver_transfers` → `silver_transactions`
       to avoid a ref cycle. dbt tests: unique/not_null + relationships on both legs; Python tests
       assert the 4 scenario pairs (card payment + Venmo cash-out × 2 months), 1:1 legs, and that

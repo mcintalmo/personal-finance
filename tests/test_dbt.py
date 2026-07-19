@@ -245,6 +245,22 @@ class TestSilverTransfers:
         ids = [leg for (leg,) in legs]
         assert len(ids) == len(set(ids))
 
+    def test_name_match_corroborates_and_sets_confidence(self, built_warehouse):
+        """A leg that names the counterparty account raises confidence to high.
+        The Venmo cash-out landing in checking names 'VENMO'; the card payment
+        has no name overlap in this fixture, so it stays medium."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select from_account, to_account, name_match, confidence "
+                "from main_silver.silver_transfers"
+            ).fetchall()
+        for _from, _to, name_match, confidence in rows:
+            assert confidence == ("high" if name_match else "medium")
+        tagged = {(f, t, nm, c) for f, t, nm, c in rows}
+        assert ("Venmo", "Chase Checking", True, "high") in tagged
+        assert ("Chase Checking", "Capital One Card", False, "medium") in tagged
+
     def test_excluding_transfers_reduces_spend(self, built_warehouse):
         """The card-payment and cash-out legs drop out of a spend measure once
         transfers are excluded."""
