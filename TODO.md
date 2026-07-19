@@ -11,13 +11,15 @@
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
 > `pf ingest`/`pf watch` → idempotent bronze Parquet (CSV + OFX), source inferred or `--source`.
 
-- [ ] ⏳ IN PROGRESS — Transfer detection: correlate paired movements across accounts
-      (amount negation + date window + account pair) and exclude from spend
-- [ ] dbt data tests on every silver model (silver_transactions + silver_merchants covered;
-      extend to future models)
-- [ ] Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
+- [ ] ⏳ IN PROGRESS — Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
       resolve city-only suffixes and brand variants the generic macro can't (follow-up to
       merchant cleaning)
+- [ ] Merchant normalization — leverage existing data, don't hand-roll: evaluate Python
+      libraries (e.g. cleanco) and public merchant/brand datasets (MCC lists, OpenCorporates,
+      merchant-name normalization corpora) to replace/augment the regex macro
+- [ ] Merchant resolution for the outlier tail: fuzzy match / semantic (embedding) search /
+      local-LLM classifier to map descriptors the deterministic cleaner can't resolve to a
+      canonical merchant — feeds the Phase 4 categorizer
 
 ## Backlog (later phases)
 
@@ -26,6 +28,16 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Transfer detection: `silver_transfers` correlates paired inter-account movements — an
+      outflow and inflow that negate (equal magnitude, opposite sign), same currency, different
+      accounts, within `transfer_window_days` (dbt var, default 3). Matched 1:1 via mutually-best
+      ranking so a repeated amount can't double-count. `silver_transactions` gains `is_transfer`
+      (both legs flagged) so spend/income can exclude money moved between your own accounts.
+      Cleanly split `stg_transactions` (ephemeral grain) → `silver_transfers` → `silver_transactions`
+      to avoid a ref cycle. dbt tests: unique/not_null + relationships on both legs; Python tests
+      assert the 4 scenario pairs (card payment + Venmo cash-out × 2 months), 1:1 legs, and that
+      excluding transfers reduces spend — `transform/models/silver/` (2026-07-19). **Phase 3 core
+      cleaning complete** (silver_transactions/merchants/transfers, each dbt-tested).
 - [x] Merchant descriptor cleaning: `normalize_merchant` dbt macro deterministically cleans a
       raw descriptor (upper-case; strip ACH/Venmo reference tails, processor prefixes like
       `SQ *`/`PP*`/`PAYPAL *`, store/reference numbers, domain suffixes, and a trailing `CITY ST`

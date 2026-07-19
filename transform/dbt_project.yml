@@ -9,6 +9,12 @@ profile: personal_finance
 model-paths: ["models"]
 test-paths: ["tests"]
 
+# User-tunable knobs (override with `dbt build --vars '{transfer_window_days: 5}'`).
+vars:
+  # How many days apart the two legs of an inter-account transfer may post
+  # (ACH can settle a day or two after it leaves). See silver_transfers.
+  transfer_window_days: 3
+
 clean-targets:
   - target
   - dbt_packages
