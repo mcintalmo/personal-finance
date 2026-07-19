@@ -11,10 +11,13 @@
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
 > `pf ingest`/`pf watch` → idempotent bronze Parquet (CSV + OFX), source inferred or `--source`.
 
-- [ ] ⏳ IN PROGRESS — Merchant descriptor cleaning and normalization (raw string → merchant entity)
-- [ ] Transfer detection: correlate paired movements across accounts (amount negation +
-      date window + account pair) and exclude from spend
-- [ ] dbt data tests on every silver model (silver_transactions covered; extend to future models)
+- [ ] ⏳ IN PROGRESS — Transfer detection: correlate paired movements across accounts
+      (amount negation + date window + account pair) and exclude from spend
+- [ ] dbt data tests on every silver model (silver_transactions + silver_merchants covered;
+      extend to future models)
+- [ ] Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
+      resolve city-only suffixes and brand variants the generic macro can't (follow-up to
+      merchant cleaning)
 
 ## Backlog (later phases)
 
@@ -22,6 +25,16 @@ See [docs/FEATURES.md](docs/FEATURES.md) — Phases 4–8. Tasks are promoted in
 one phase at a time when the previous phase's demo is complete.
 
 ## Done
+
+- [x] Merchant descriptor cleaning: `normalize_merchant` dbt macro deterministically cleans a
+      raw descriptor (upper-case; strip ACH/Venmo reference tails, processor prefixes like
+      `SQ *`/`PP*`/`PAYPAL *`, store/reference numbers, domain suffixes, and a trailing `CITY ST`
+      locality) into an UPPERCASE key. `silver_transactions` gains `merchant_name`; new
+      `silver_merchants` dimension rolls it up (deterministic md5 `merchant_id`, transaction_count,
+      total_outflow, first/last seen). A singular dbt test unit-tests the macro on curated cases
+      (incl. processor prefixes absent from synth); relationships test ties transactions to the
+      dimension. City-only suffixes and brand aliases deferred to the config-driven follow-up —
+      `transform/macros/`, `transform/models/silver/` (2026-07-19)
 
 - [x] Silver transactions model: `silver_transactions` unions every ingested source via a
       config-free `bronze/*/*.parquet` glob (dbt-duckdb external source, `union_by_name`), so a

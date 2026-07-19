@@ -40,6 +40,28 @@ models:
           - accepted_values:
               arguments:
                 values: [inflow, outflow]
+      - name: merchant_name
+        description: >-
+          Cleaned merchant key from the raw descriptor (normalize_merchant macro);
+          NULL only when the raw description is blank.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('silver_merchants')
+                field: merchant_name
+
+  - name: silver_merchants
+    description: >-
+      Merchant dimension — one row per distinct cleaned merchant_name, derived
+      from silver_transactions.
+    columns:
+      - name: merchant_id
+        description: Deterministic hash of merchant_name; stable across runs.
+        data_tests: [unique, not_null]
+      - name: merchant_name
+        data_tests: [unique, not_null]
+      - name: transaction_count
+        data_tests: [not_null]
 
   - name: silver_categories
     description: Cleaned category taxonomy (one row per category node).

@@ -152,3 +152,48 @@ class TestSilverTransactions:
         warehouse, _, _, _ = built_warehouse
         for _tid, _source, _amount, _flow, desc in self._rows(warehouse):
             assert desc is None or desc == desc.strip()
+
+
+class TestSilverMerchants:
+    def test_merchant_name_is_normalized_key(self, built_warehouse):
+        """Every cleaned name is upper-cased, trimmed, and stripped of the
+        obvious noise (store/reference numbers)."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            names = [
+                name
+                for (name,) in conn.execute(
+                    "select distinct merchant_name from main_silver.silver_transactions "
+                    "where merchant_name is not null"
+                ).fetchall()
+            ]
+        assert names
+        for name in names:
+            assert name == name.strip() == name.upper()
+            assert "#" not in name
+
+    def test_locality_and_store_numbers_stripped_end_to_end(self, built_warehouse):
+        """'CHEVRON 0093 BELLEVUE WA' across locations collapses to one merchant."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            merchants = {
+                name
+                for (name,) in conn.execute(
+                    "select merchant_name from main_silver.silver_merchants"
+                ).fetchall()
+            }
+        assert "CHEVRON" in merchants
+        assert "TRADER JOE'S" in merchants
+
+    def test_dimension_covers_every_named_transaction(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (named_txns,) = conn.execute(
+                "select count(*) from main_silver.silver_transactions "
+                "where merchant_name is not null"
+            ).fetchone()
+            (dim_total, dim_rows) = conn.execute(
+                "select sum(transaction_count), count(*) from main_silver.silver_merchants"
+            ).fetchone()
+        assert dim_total == named_txns  # every named transaction is counted once
+        assert dim_rows > 0

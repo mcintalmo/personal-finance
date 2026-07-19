@@ -31,6 +31,8 @@ select
     cast(amount as decimal(18, 2)) as amount,
     case when amount < 0 then 'outflow' else 'inflow' end as flow,
     nullif(trim(description_raw), '') as description_raw,
+    -- Cleaned merchant key derived deterministically from the raw descriptor.
+    nullif({{ normalize_merchant('description_raw') }}, '') as merchant_name,
     external_id,
     source_file,
     ingested_at
