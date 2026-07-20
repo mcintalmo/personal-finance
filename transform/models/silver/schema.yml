@@ -1,6 +1,115 @@
 version: 2
 
 models:
+  - name: silver_transactions
+    description: >-
+      Cleaned, deduplicated transactions unioned across every ingested source
+      (one row per logical transaction, keyed by transaction_id = bronze row_hash).
+    columns:
+      - name: transaction_id
+        description: Stable per-transaction id (bronze row_hash); the grain.
+        data_tests: [unique, not_null]
+      - name: source
+        data_tests: [not_null]
+      - name: account_name
+        data_tests: [not_null]
+      - name: account_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - checking
+                  - savings
+                  - credit_card
+                  - cash
+                  - payment_app
+                  - investment
+                  - loan
+                  - other
+      - name: currency
+        data_tests: [not_null]
+      - name: posted_on
+        data_tests: [not_null]
+      - name: amount
+        data_tests: [not_null]
+      - name: flow
+        description: Derived direction — outflow when amount < 0, else inflow.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [inflow, outflow]
+      - name: merchant_name
+        description: >-
+          Cleaned merchant key from the raw descriptor (normalize_merchant macro);
+          NULL only when the raw description is blank.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('silver_merchants')
+                field: merchant_name
+      - name: is_transfer
+        description: >-
+          True when this row is a leg of a detected inter-account transfer
+          (silver_transfers); spend/income measures should exclude these.
+        data_tests: [not_null]
+
+  - name: silver_transfers
+    description: >-
+      Detected inter-account transfers — one row per matched (outflow, inflow)
+      pair of transactions that move money between the user's own accounts.
+    columns:
+      - name: transfer_id
+        data_tests: [unique, not_null]
+      - name: outflow_id
+        description: The paying (negative) leg; matched 1:1, so unique here.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: inflow_id
+        description: The receiving (positive) leg; matched 1:1, so unique here.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: from_account
+        data_tests: [not_null]
+      - name: to_account
+        data_tests: [not_null]
+      - name: amount
+        data_tests: [not_null]
+      - name: name_match
+        description: True when a leg's descriptor names the counterparty account.
+        data_tests: [not_null]
+      - name: confidence
+        description: high when name-corroborated, else medium (amount + date only).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [high, medium]
+
+  - name: silver_merchants
+    description: >-
+      Merchant dimension — one row per distinct cleaned merchant_name, derived
+      from silver_transactions.
+    columns:
+      - name: merchant_id
+        description: Deterministic hash of merchant_name; stable across runs.
+        data_tests: [unique, not_null]
+      - name: merchant_name
+        data_tests: [unique, not_null]
+      - name: transaction_count
+        data_tests: [not_null]
+
   - name: silver_categories
     description: Cleaned category taxonomy (one row per category node).
     columns:

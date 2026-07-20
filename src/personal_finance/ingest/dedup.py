@@ -13,8 +13,13 @@ key that makes dedup exact. Because an id is unique only within an account, an
 optional ``account_id`` scopes the key so two statements bundled in one file
 (e.g. checking + savings) can't collide on a shared id. When a source has no
 external id, the key falls back to the row's content
-``(source, posted_on, amount, description_raw)``; this is best-effort, so a
-genuinely-repeated identical charge appearing in a later file is treated as
+``(source, posted_on, amount, description_raw)`` plus an ``occurrence`` index —
+the Nth row with that exact content within one ingest batch. Without the
+index, two genuinely different same-day transactions that happen to share an
+amount and description (two identical vending-machine purchases) would hash
+identically and collapse into one row downstream (silver's dedup keeps only
+one per row_hash); the index keeps them distinct within a file while a
+later file repeating the same content is still (best-effort) treated as
 already-seen. Prefer sources that expose a stable id.
 """
 
@@ -36,19 +41,26 @@ def compute_row_hash(
     description_raw: str,
     external_id: str | None,
     account_id: str | None = None,
+    occurrence: int = 0,
 ) -> str:
     """Return the deterministic idempotency key for one bronze row.
 
-    Uses ``external_id`` when present (exact), else the row's content.
-    ``source_name`` and the optional ``account_id`` always scope the key, so
-    identical activity — or a reused id — in two different accounts never
-    collides.
+    Uses ``external_id`` when present (exact), else the row's content plus
+    ``occurrence`` — the 0-based index of this row among others sharing the
+    same content within the current ingest batch, so genuinely-repeated
+    same-day/amount/description transactions in one file get distinct hashes
+    instead of colliding. ``source_name`` and the optional ``account_id``
+    always scope the key, so identical activity — or a reused id — in two
+    different accounts never collides.
     """
     scope = f"{account_id}:" if account_id else ""
     if external_id:
         key = f"{source_name}|id|{scope}{external_id}"
     else:
-        key = f"{source_name}|content|{scope}{posted_on.isoformat()}|{amount}|{description_raw}"
+        key = (
+            f"{source_name}|content|{scope}{posted_on.isoformat()}|{amount}|"
+            f"{description_raw}|{occurrence}"
+        )
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 

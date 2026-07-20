@@ -71,7 +71,12 @@ def read_ofx_transactions(source_name: str, file_path: Path) -> Iterator[dict[st
             }
 
 
-@dlt.resource(name="transactions", write_disposition="append")
+@dlt.resource(
+    name="transactions",
+    write_disposition="append",
+    # Match csv_transactions: keep external_id a stable text column in bronze.
+    columns={"external_id": {"data_type": "text", "nullable": True}},
+)
 def ofx_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRow]:
     """dlt resource yielding canonical bronze rows for one OFX/QFX file.
 

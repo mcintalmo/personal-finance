@@ -5,25 +5,70 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 3 — Core cleaning (silver)
+## Phase 4 — Categorization
 
 > Phase 1 (Foundation) complete — demo verified 2026-07-12.
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
 > `pf ingest`/`pf watch` → idempotent bronze Parquet (CSV + OFX), source inferred or `--source`.
+> Phase 3 (Core cleaning) complete — demo verified 2026-07-19: `pf transform` → silver
+> transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
+> dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Silver transactions model: dedup, type normalization, and sign
-      conventions over the bronze union (dbt-duckdb; bronze `row_hash` is the grain)
-- [ ] Merchant descriptor cleaning and normalization (raw string → merchant entity)
-- [ ] Transfer detection: correlate paired movements across accounts (amount negation +
-      date window + account pair) and exclude from spend
-- [ ] dbt data tests on every silver model
+- [ ] ⏳ IN PROGRESS — Rules engine: user-editable YAML merchant/pattern → category rules
+      (rules.yaml already exists — apply it over silver_transactions.merchant_name)
 
 ## Backlog (later phases)
 
 See [docs/FEATURES.md](docs/FEATURES.md) — Phases 4–8. Tasks are promoted into this file
 one phase at a time when the previous phase's demo is complete.
 
+**Phase 3 merchant follow-ups** (deferred — evaluate existing tooling before hand-rolling more):
+
+- [ ] Merchant normalization — leverage existing data, don't hand-roll: evaluate Python
+      libraries (e.g. cleanco) and public merchant/brand datasets (MCC lists, OpenCorporates,
+      merchant-name normalization corpora) to replace/augment the regex macro. **Do this before**
+      the config-driven aliases below.
+- [ ] Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
+      resolve city-only suffixes and brand variants the generic macro can't
+- [ ] Merchant resolution for the outlier tail: fuzzy match / semantic (embedding) search /
+      local-LLM classifier to map descriptors the deterministic cleaner can't resolve to a
+      canonical merchant — feeds the Phase 4 categorizer
+
 ## Done
+
+- [x] Transfer detection: `silver_transfers` correlates paired inter-account movements — an
+      outflow and inflow that negate (equal magnitude, opposite sign), same currency, different
+      accounts, within `transfer_window_days` (dbt var, default 3). Matched 1:1 via mutually-best
+      ranking so a repeated amount can't double-count. Corroborated by a name signal — when a
+      leg's descriptor names the counterparty account (checking "VENMO CASHOUT" ↔ the Venmo
+      account), `name_match`/`confidence=high` and the pair wins ranking ties (amount+date-only
+      pairs are `medium`). `silver_transactions` gains `is_transfer` (both legs flagged) so
+      spend/income can exclude money moved between your own accounts.
+      Cleanly split `stg_transactions` (ephemeral grain) → `silver_transfers` → `silver_transactions`
+      to avoid a ref cycle. dbt tests: unique/not_null + relationships on both legs; Python tests
+      assert the 4 scenario pairs (card payment + Venmo cash-out × 2 months), 1:1 legs, and that
+      excluding transfers reduces spend — `transform/models/silver/` (2026-07-19). **Phase 3 core
+      cleaning complete** (silver_transactions/merchants/transfers, each dbt-tested).
+- [x] Merchant descriptor cleaning: `normalize_merchant` dbt macro deterministically cleans a
+      raw descriptor (upper-case; strip ACH/Venmo reference tails, processor prefixes like
+      `SQ *`/`PP*`/`PAYPAL *`, store/reference numbers, domain suffixes, and a trailing `CITY ST`
+      locality) into an UPPERCASE key. `silver_transactions` gains `merchant_name`; new
+      `silver_merchants` dimension rolls it up (deterministic md5 `merchant_id`, transaction_count,
+      total_outflow, first/last seen). A singular dbt test unit-tests the macro on curated cases
+      (incl. processor prefixes absent from synth); relationships test ties transactions to the
+      dimension. City-only suffixes and brand aliases deferred to the config-driven follow-up —
+      `transform/macros/`, `transform/models/silver/` (2026-07-19)
+
+- [x] Silver transactions model: `silver_transactions` unions every ingested source via a
+      config-free `bronze/*/*.parquet` glob (dbt-duckdb external source, `union_by_name`), so a
+      new bank appears automatically. Dedups on `row_hash` (the grain → `transaction_id`),
+      normalizes types (amount→`decimal(18,2)`, description trimmed, currency upper-cased) and
+      surfaces a derived `flow` (inflow/outflow); the signed convention is already uniform from
+      ingest. dbt data tests: unique/not_null on the grain, accepted_values on account_type and
+      flow. Also made bronze's `external_id` a stable (always-present, nullable) column via a dlt
+      column hint so the single-source union never loses it. `pf transform` now wires
+      `DATA_BRONZE_PATH` and guards on "no ingested data" — `transform/models/silver/`, `cli.py`
+      (2026-07-19)
 
 - [x] Watch-folder ingestion: `pf watch FOLDER [--source NAME]` ingests exports as they are
       dropped in, via watchdog's OS filesystem observer (created/moved events) — sweeps files
