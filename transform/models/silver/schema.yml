@@ -97,6 +97,40 @@ models:
               arguments:
                 values: [high, medium]
 
+  - name: silver_transaction_categories
+    description: >-
+      Stage 1 (rules) of the categorization cascade — one row per transaction
+      that a config rule matched. A transaction absent here is uncategorized by
+      this stage; later cascade stages pick up the remainder.
+    columns:
+      - name: transaction_id
+        description: >-
+          One row per matched transaction; absent = not matched by any rule.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: rule_id
+        data_tests: [not_null]
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
   - name: silver_merchants
     description: >-
       Merchant dimension — one row per distinct cleaned merchant_name, derived

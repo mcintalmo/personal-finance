@@ -31,7 +31,7 @@ from personal_finance.ingest import (
     ingest_file,
     watch_folder,
 )
-from personal_finance.seed import seed_categories
+from personal_finance.seed import seed_categories, seed_rules
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver
@@ -74,7 +74,7 @@ def init_db(
         None, help="User config directory (default: Settings.config_dir)."
     ),
 ) -> None:
-    """Create the warehouse schema and seed the category taxonomy."""
+    """Create the warehouse schema and seed the category taxonomy and rules."""
     warehouse = get_settings().data.warehouse_path
     try:
         config = load_user_config(config_dir)
@@ -85,7 +85,8 @@ def init_db(
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
         categories = seed_categories(conn, config.taxonomy)
-    typer.echo(f"Initialized {warehouse}: {len(categories)} categories seeded")
+        rules = seed_rules(conn, config.rules)
+    typer.echo(f"Initialized {warehouse}: {len(categories)} categories, {len(rules)} rules seeded")
 
 
 @app.command()

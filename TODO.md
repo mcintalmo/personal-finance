@@ -14,8 +14,13 @@
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Rules engine: user-editable YAML merchant/pattern → category rules
-      (rules.yaml already exists — apply it over silver_transactions.merchant_name)
+- [ ] ⏳ IN PROGRESS — Embedding-similarity classifier vs. labeled history (nomic-embed-text via
+      Ollama) — picks up transactions absent from silver_transaction_categories
+- [ ] Local LLM fallback for the ambiguous tail
+- [ ] Human review queue for low-confidence assignments; corrections stored as labels and fed
+      back to the classifier
+- [ ] Category rollups through the hierarchy at every level (gold mart over
+      silver_transaction_categories + gold_category_paths)
 
 ## Backlog (later phases)
 
@@ -36,6 +41,26 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Rules engine: `silver_transaction_categories` (stage 1 of the categorization cascade)
+      applies config-driven pattern→category rules over `silver_transactions`. Rules are seeded
+      from `rules.yaml` into a new `rules` table (`seed_rules`, wired into `pf init-db`; full
+      replace on reseed — unlike categories, rules have no user-editable state to preserve).
+      `category_id` is resolved via the existing deterministic `category_id_for_path` (no need for
+      a gold-layer join). First match wins by file order (`priority`). `RuleConfig.applies_to` is
+      now a validated enum (`description_raw`/`merchant_name`/`source`/`account_name`, default
+      `merchant_name` — the cleaned, less-noisy target) instead of a free string, and its pattern
+      is validated against **DuckDB's own RE2 engine**, not Python's `re` — they differ (no
+      backreferences/lookaround; a mid-pattern `(?i)` doesn't apply globally), so a bad pattern now
+      fails at config load instead of deep in a dbt build. Grain: at most one row per
+      transaction_id (matched only); absent = not yet categorized, ready for the embedding/LLM
+      stages to pick up. Hit and fixed a real DuckDB 1.5.4 engine bug along the way: a `CASE`
+      picking one of several text columns, then `regexp_matches`-ed inside a cross join, could
+      **segfault** (SIGSEGV) on a value containing a multi-byte character (an emoji in a Venmo
+      note) — reproduced via real `dbt build` runs (not just isolated queries), fixed by
+      restructuring to one `UNION ALL` branch per `applies_to` value instead of a `CASE`, and
+      stress-tested crash-free across 18+ real builds with the emoji fixture intact — `ddl.py`,
+      `models.py` (new `Rule` entity), `seed.py`, `user_config.py`,
+      `transform/models/silver/silver_transaction_categories.sql` (2026-07-19)
 - [x] Transfer detection: `silver_transfers` correlates paired inter-account movements — an
       outflow and inflow that negate (equal magnitude, opposite sign), same currency, different
       accounts, within `transfer_window_days` (dbt var, default 3). Matched 1:1 via mutually-best

@@ -53,9 +53,12 @@ class TestInitDb:
         warehouse = get_settings().data.warehouse_path
         assert warehouse.exists()
         with duckdb.connect(str(warehouse)) as conn:
-            (count,) = conn.execute("select count(*) from categories").fetchone()
-        assert count > 0
-        assert "categories seeded" in result.output
+            (categories,) = conn.execute("select count(*) from categories").fetchone()
+            (rules,) = conn.execute("select count(*) from rules").fetchone()
+        assert categories > 0
+        assert rules > 0
+        assert "categories" in result.output
+        assert "rules seeded" in result.output
 
     def test_is_idempotent(self):
         first = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])

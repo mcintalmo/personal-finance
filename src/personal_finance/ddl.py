@@ -63,6 +63,20 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "rules",
+        """
+        CREATE TABLE IF NOT EXISTS rules (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            pattern TEXT NOT NULL,
+            applies_to TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            note TEXT
+        )
+        """,
+    ),
+    (
         "transactions",
         """
         CREATE TABLE IF NOT EXISTS transactions (

@@ -14,7 +14,7 @@ import pytest
 
 from personal_finance.ddl import create_schema
 from personal_finance.ingest import run_ingestion
-from personal_finance.seed import seed_categories
+from personal_finance.seed import seed_categories, seed_rules
 from personal_finance.synth import generate_scenario, write_scenario
 from personal_finance.user_config import load_user_config
 
@@ -52,6 +52,7 @@ def built_warehouse(tmp_path_factory):
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
         seed_categories(conn, config.taxonomy)
+        seed_rules(conn, config.rules)
 
     exports = root / "exports"
     write_scenario(generate_scenario(seed=42, months=2), exports)
@@ -274,3 +275,122 @@ class TestSilverTransfers:
                 "where amount < 0 and not is_transfer"
             ).fetchone()
         assert without_transfers < with_transfers
+
+
+class TestSilverTransactionCategories:
+    def test_matches_expected_categories(self, built_warehouse):
+        """Every merchant the example rules.yaml names lands in the right
+        category path, matched against merchant_name (the recommended,
+        cleaned target)."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select t.merchant_name, gc.path
+                from main_silver.silver_transaction_categories sc
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = sc.category_id
+                """
+            ).fetchall()
+        by_merchant = dict(rows)
+        assert by_merchant["ACME CORP PAYROLL"] == "income/salary"
+        assert by_merchant["KROGER"] == "essentials/groceries"
+        assert by_merchant["SAFEWAY"] == "essentials/groceries"
+        assert by_merchant["ALDI"] == "essentials/groceries"
+        assert by_merchant["TRADER JOE'S"] == "essentials/groceries"
+        assert by_merchant["SHELL OIL"] == "essentials/commute/gas"
+        assert by_merchant["CHEVRON"] == "essentials/commute/gas"
+        assert by_merchant["NETFLIX"] == "non-essentials/entertainment/streaming"
+        assert by_merchant["SPOTIFY"] == "non-essentials/entertainment/streaming"
+
+    def test_first_match_wins_by_priority(self, built_warehouse):
+        """Every categorized row used the lowest-priority (first-declared)
+        rule that matched — never a later one."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            bad = conn.execute(
+                """
+                select sc.transaction_id
+                from main_silver.silver_transaction_categories sc
+                join main.rules r on r.id = sc.rule_id
+                join main.rules better
+                    on better.priority < r.priority
+                where exists (
+                    select 1
+                    from main_silver.silver_transactions t
+                    where t.transaction_id = sc.transaction_id
+                    and (
+                        (better.applies_to = 'description_raw'
+                         and regexp_matches(t.description_raw, better.pattern))
+                        or (better.applies_to = 'merchant_name'
+                            and t.merchant_name is not null
+                            and regexp_matches(t.merchant_name, better.pattern))
+                        or (better.applies_to = 'source'
+                            and regexp_matches(t.source, better.pattern))
+                        or (better.applies_to = 'account_name'
+                            and regexp_matches(t.account_name, better.pattern))
+                    )
+                )
+                """
+            ).fetchall()
+        assert bad == []
+
+    def test_at_most_one_category_per_transaction(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories"
+            ).fetchone()
+        assert total == distinct
+
+    def test_uncategorized_transactions_absent_not_nulled(self, built_warehouse):
+        """A transaction with no matching rule (transfers, misc merchants,
+        emoji-containing Venmo notes) is simply absent from this stage — not a
+        row with a null category_id."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            total_tx = conn.execute(
+                "select count(*) from main_silver.silver_transactions"
+            ).fetchone()[0]
+            categorized = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories"
+            ).fetchone()[0]
+        assert 0 < categorized < total_tx
+
+    def test_emoji_containing_transactions_do_not_crash_and_stay_uncategorized(
+        self, built_warehouse
+    ):
+        """Regression test for a real DuckDB 1.5.4 engine crash (SIGSEGV) that
+        this model's query shape triggered when a value with a multi-byte
+        character (e.g. an emoji in a Venmo note) flowed through regexp_matches
+        inside the rule cross join. built_warehouse succeeding at all is most of
+        this test; we also confirm the emoji rows land as expected (no rule
+        matches them, so they're simply absent from this stage)."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            emoji_merchants = conn.execute(
+                r"""
+                select merchant_name
+                from main_silver.silver_transactions
+                where regexp_matches(merchant_name, '[^\x00-\x7F]')
+                """
+            ).fetchall()
+            categorized_ids = {
+                row[0]
+                for row in conn.execute(
+                    "select transaction_id from main_silver.silver_transaction_categories"
+                ).fetchall()
+            }
+            emoji_tx_ids = {
+                row[0]
+                for row in conn.execute(
+                    r"""
+                    select transaction_id
+                    from main_silver.silver_transactions
+                    where regexp_matches(merchant_name, '[^\x00-\x7F]')
+                    """
+                ).fetchall()
+            }
+        assert emoji_merchants  # the fixture does contain a multi-byte value
+        assert emoji_tx_ids.isdisjoint(categorized_ids)

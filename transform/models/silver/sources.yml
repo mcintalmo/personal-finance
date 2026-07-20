@@ -8,6 +8,11 @@ sources:
     tables:
       - name: categories
         description: Hierarchical taxonomy seeded from config taxonomy.yaml.
+      - name: rules
+        description: >-
+          Deterministic pattern → category rules seeded from config rules.yaml
+          (personal_finance.seed.seed_rules); priority is file order, first
+          match wins.
 
   # Bronze = raw source exports landed as Parquet by dlt (Phase 2). Read as a
   # single config-free glob over every source directory: a new bank/source

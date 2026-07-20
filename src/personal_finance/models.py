@@ -183,3 +183,16 @@ class Label(Entity):
     subject_kind: EntityKind
     subject_id: str
     category_id: str
+
+
+class Rule(Entity):
+    """A deterministic pattern → category rule, seeded from ``rules.yaml``.
+
+    ``priority`` is the rule's position in the config file (first match wins);
+    seeding fully replaces this table each time, so it has no note to preserve.
+    """
+
+    pattern: str
+    applies_to: str
+    category_id: str
+    priority: int

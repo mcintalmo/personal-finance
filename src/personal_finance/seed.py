@@ -1,4 +1,4 @@
-"""Seed the ``categories`` table from the YAML taxonomy.
+"""Seed the ``categories`` and ``rules`` tables from user config.
 
 Category identity is the taxonomy path (see
 :func:`personal_finance.user_config.category_id_for_path`), so seeding is an
@@ -11,11 +11,21 @@ categories is a deliberate, separate operation for a later phase.
 
 User-authored ``note`` values are never touched by seeding — notes belong to
 the user, not to the config.
+
+Rules are different: nothing else references a rule's id, and a rule carries
+no user-editable state, so re-seeding fully replaces the table — removing or
+reordering a rule in ``rules.yaml`` takes effect immediately.
 """
 
 from typing import TYPE_CHECKING
 
-from personal_finance.user_config import TaxonomyNode, taxonomy_to_categories
+from personal_finance.models import Rule
+from personal_finance.user_config import (
+    RuleConfig,
+    TaxonomyNode,
+    category_id_for_path,
+    taxonomy_to_categories,
+)
 
 if TYPE_CHECKING:
     import duckdb
@@ -50,3 +60,36 @@ def seed_categories(
     for category in categories.values():
         conn.execute(_UPSERT_CATEGORY, category.model_dump())
     return categories
+
+
+_INSERT_RULE = """
+INSERT INTO rules (id, created_at, pattern, applies_to, category_id, priority, note)
+VALUES ($id, $created_at, $pattern, $applies_to, $category_id, $priority, $note)
+"""
+
+
+def seed_rules(conn: duckdb.DuckDBPyConnection, rules: list[RuleConfig]) -> list[Rule]:
+    """Replace the ``rules`` table with the current ``rules.yaml`` config.
+
+    Args:
+        conn: An open DuckDB connection with the core schema created.
+        rules: The rule list, e.g. ``load_user_config().rules`` — already
+            validated (compiling pattern, existing category path) by
+            :class:`~personal_finance.user_config.RuleConfig`.
+
+    Returns:
+        The seeded rules, in priority order (first match wins).
+    """
+    conn.execute("DELETE FROM rules")
+    seeded = [
+        Rule(
+            pattern=rule.pattern,
+            applies_to=rule.applies_to.value,
+            category_id=category_id_for_path(rule.category),
+            priority=priority,
+        )
+        for priority, rule in enumerate(rules)
+    ]
+    for rule in seeded:
+        conn.execute(_INSERT_RULE, rule.model_dump())
+    return seeded
