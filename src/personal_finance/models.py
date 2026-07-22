@@ -196,3 +196,16 @@ class Rule(Entity):
     applies_to: str
     category_id: str
     priority: int
+
+
+class MerchantEmbedding(Entity):
+    """A cached embedding vector for a distinct ``merchant_name``.
+
+    Computed once per (merchant_name, model) via a local Ollama call — see
+    :mod:`personal_finance.embed` — and reused across runs so re-running the
+    embedding stage doesn't re-call Ollama for merchants already embedded.
+    """
+
+    merchant_name: str
+    model: str
+    embedding: list[float]

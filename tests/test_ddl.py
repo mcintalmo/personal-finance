@@ -21,6 +21,7 @@ from personal_finance.models import (
     Link,
     LinkType,
     Merchant,
+    MerchantEmbedding,
     Rule,
     Transaction,
     TransactionSplit,
@@ -31,6 +32,7 @@ EXPECTED_TABLES = {
     "merchants",
     "categories",
     "rules",
+    "merchant_embeddings",
     "transactions",
     "transaction_splits",
     "documents",
@@ -88,6 +90,9 @@ class TestRoundTrip:
             category_id=groceries.id,
             priority=0,
         )
+        merchant_embedding = MerchantEmbedding(
+            merchant_name="TRADER JOE'S", model="nomic-embed-text", embedding=[0.1, 0.2, 0.3]
+        )
         txn = Transaction(
             account_id=account.id,
             posted_on=date(2026, 7, 1),
@@ -128,6 +133,7 @@ class TestRoundTrip:
         insert(conn, "categories", root)
         insert(conn, "categories", groceries)
         insert(conn, "rules", rule)
+        insert(conn, "merchant_embeddings", merchant_embedding)
         insert(conn, "transactions", txn)
         insert(conn, "transaction_splits", split)
         insert(conn, "documents", doc, parsed_payload=json.dumps({"total": "42.50"}))

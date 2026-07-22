@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from personal_finance.cli import app
 from personal_finance.config import get_settings
+from personal_finance.exceptions import ExternalServiceError
 
 runner = CliRunner()
 
@@ -133,10 +134,78 @@ class TestDeposit:
         assert "File not found" in result.output
 
 
-def test_enrich_stub_exits_with_pointer_to_plan():
-    result = runner.invoke(app, ["enrich"])
-    assert result.exit_code == 2
-    assert "not implemented" in result.output
+class TestEnrich:
+    def test_requires_initialized_warehouse(self):
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def test_requires_transform_has_run(self):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 1
+        assert "pf transform" in result.output
+
+    def _build_transformed_warehouse(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "exports" / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_embeds_and_reports_count(self, monkeypatch, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def embed(self, texts):
+                return [[float(len(t)), 0.0] for t in texts]
+
+        monkeypatch.setattr("personal_finance.cli.EmbeddingClient", lambda *a, **k: FakeClient())
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 0, result.output
+        assert "Embedded" in result.output
+        assert "pf transform" in result.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            (count,) = conn.execute("select count(*) from merchant_embeddings").fetchone()
+        assert count > 0
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_ollama_failure_exits_nonzero(self, monkeypatch, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+
+        class FailingClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def embed(self, texts):
+                raise ExternalServiceError("Ollama unreachable")
+
+        monkeypatch.setattr("personal_finance.cli.EmbeddingClient", lambda *a, **k: FailingClient())
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 1
+        assert "Embedding failed" in result.output
 
 
 class TestWatch:

@@ -11,7 +11,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf ingest      load source export files into the bronze layer
     pf watch       watch a folder and ingest exports as they are dropped in
     pf deposit     atomically place a completed file into a watched folder
-    pf enrich      (Phase 4 stub)
+    pf enrich      embed merchants for the embedding-similarity categorization stage
 """
 
 import os
@@ -23,7 +23,8 @@ import typer
 
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
-from personal_finance.exceptions import ConfigurationError
+from personal_finance.embed import EmbeddingClient, compute_missing_embeddings
+from personal_finance.exceptions import ConfigurationError, ExternalServiceError
 from personal_finance.ingest import (
     IngestOutcome,
     IngestStatus,
@@ -271,9 +272,49 @@ def deposit(
 
 
 @app.command()
-def enrich() -> None:
-    """Run the categorization/enrichment cascade (Phase 4 — not implemented)."""
-    typer.echo(
-        "pf enrich is not implemented yet — planned for Phase 4 (see docs/PLAN.md).", err=True
-    )
-    raise typer.Exit(code=2)
+def enrich(
+    base_url: str | None = typer.Option(
+        None, help="Ollama server URL (default: Settings.ollama.base_url)."
+    ),
+    model: str | None = typer.Option(
+        None, help="Embedding model (default: Settings.ollama.embedding_model)."
+    ),
+) -> None:
+    """Embed every distinct merchant not yet cached, for the embedding-similarity
+    categorization stage.
+
+    Requires `pf transform` to have run at least once (reads
+    silver_transactions.merchant_name) and a local Ollama server with the
+    embedding model pulled. Re-run `pf transform` afterward to build
+    silver_transaction_categories_embedding against the newly cached vectors.
+    """
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        result = conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
+        ).fetchone()
+        if not result or not result[0]:
+            typer.echo(
+                "silver_transactions has not been built yet — run `pf transform` first.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        with EmbeddingClient(
+            base_url or settings.ollama.base_url, model or settings.ollama.embedding_model
+        ) as client:
+            try:
+                count = compute_missing_embeddings(
+                    conn, client, model or settings.ollama.embedding_model
+                )
+            except ExternalServiceError as exc:
+                typer.echo(f"Embedding failed: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Embedded {count} new merchant(s). Run `pf transform` to apply them.")

@@ -13,6 +13,7 @@ import duckdb
 import pytest
 
 from personal_finance.ddl import create_schema
+from personal_finance.embed import merchant_embedding_id
 from personal_finance.ingest import run_ingestion
 from personal_finance.seed import seed_categories, seed_rules
 from personal_finance.synth import generate_scenario, write_scenario
@@ -80,6 +81,68 @@ def built_warehouse(tmp_path_factory):
     finally:
         monkeypatch.undo()
     return warehouse, bronze, config, result
+
+
+# Hand-crafted vectors (not real Ollama output) so expected cosine similarities
+# are known exactly, independent of any specific embedding model's behavior.
+# KROGER is a real stage-1-categorized merchant in this fixture
+# (essentials/groceries); STARBUCKS and CHIPOTLE are real stage-1-uncategorized
+# merchants — one deliberately a near-duplicate of KROGER (should match), one
+# orthogonal (should not).
+_TEST_EMBEDDING_MODEL = "test-embedding-model"
+_TEST_CONFIDENCE_THRESHOLD = 0.80
+_SYNTHETIC_EMBEDDINGS = {
+    "KROGER": [1.0, 0.0, 0.0],
+    "STARBUCKS": [0.99, 0.01, 0.0],  # cos with KROGER ≈ 0.9999 — clears threshold
+    "CHIPOTLE": [0.0, 1.0, 0.0],  # cos with KROGER = 0 — stays unmatched
+}
+
+
+@pytest.fixture(scope="module")
+def embedding_warehouse(built_warehouse):
+    """``built_warehouse`` plus synthetic ``merchant_embeddings``, with dbt
+    re-run (overriding the embedding vars) so the embedding-stage model picks
+    them up. Views are idempotently recreated, so rebuilding on top of the
+    already-built warehouse is safe.
+    """
+    warehouse, bronze, _config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        for name, vector in _SYNTHETIC_EMBEDDINGS.items():
+            conn.execute(
+                "INSERT INTO merchant_embeddings (id, created_at, merchant_name, model, embedding) "
+                "VALUES ($id, now(), $merchant_name, $model, $embedding)",
+                {
+                    "id": merchant_embedding_id(name, _TEST_EMBEDDING_MODEL),
+                    "merchant_name": name,
+                    "model": _TEST_EMBEDDING_MODEL,
+                    "embedding": vector,
+                },
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
 
 
 class TestDbtBuild:
@@ -394,3 +457,102 @@ class TestSilverTransactionCategories:
             }
         assert emoji_merchants  # the fixture does contain a multi-byte value
         assert emoji_tx_ids.isdisjoint(categorized_ids)
+
+
+class TestSilverTransactionCategoriesEmbedding:
+    def test_near_duplicate_merchant_is_matched(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select e.matched_merchant, e.categorization_confidence
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'STARBUCKS'
+                """
+            ).fetchall()
+        assert rows, "STARBUCKS should have matched via embedding similarity"
+        for matched, confidence in rows:
+            assert matched == "KROGER"
+            assert confidence > 0.99
+
+    def test_orthogonal_merchant_stays_unmatched(self, embedding_warehouse):
+        """CHIPOTLE's embedding is orthogonal to every reference — similarity
+        0 is far below the threshold, so it must not appear in this stage."""
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            (count,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'CHIPOTLE'
+                """
+            ).fetchone()
+        assert count == 0
+
+    def test_matched_merchant_inherits_reference_category(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select gc.path
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = e.category_id
+                where t.merchant_name = 'STARBUCKS'
+                limit 1
+                """
+            ).fetchone()
+        assert row[0] == "essentials/groceries"  # inherited from KROGER
+
+    def test_grain_has_no_duplicates(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_embedding"
+            ).fetchone()
+        assert total == distinct
+
+    def test_never_recategorizes_a_stage1_transaction(self, embedding_warehouse):
+        """Stage 2 must only cover merchants stage 1 missed entirely."""
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            (overlap,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_embedding e
+                where e.transaction_id in (
+                    select transaction_id from main_silver.silver_transaction_categories
+                )
+                """
+            ).fetchone()
+        assert overlap == 0
+
+
+class TestSilverTransactionCategoriesAll:
+    def test_unions_both_stages_without_duplicates(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            stage1 = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories"
+            ).fetchone()[0]
+            stage2 = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories_embedding"
+            ).fetchone()[0]
+            combined, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_all"
+            ).fetchone()
+        assert stage2 > 0  # sanity: the synthetic match actually landed
+        assert combined == stage1 + stage2
+        assert distinct == combined  # no transaction counted by both stages
+
+    def test_starbucks_appears_via_the_combined_view(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select a.categorization_source, a.categorization_confidence
+                from main_silver.silver_transaction_categories_all a
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'STARBUCKS'
+                limit 1
+                """
+            ).fetchone()
+        assert row == ("embedding", row[1])
+        assert row[1] > 0.99

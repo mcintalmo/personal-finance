@@ -44,6 +44,17 @@ class DataSettings(BaseModel):
     bronze_path: Path = Path("data/bronze")  # append-only Parquet landing zone
 
 
+class OllamaSettings(BaseModel):
+    """Local Ollama server settings (``settings.ollama.*``).
+
+    Nothing here ever leaves the machine — ``base_url`` defaults to Ollama's
+    own local-only default.
+    """
+
+    base_url: str = "http://localhost:11434"
+    embedding_model: str = "nomic-embed-text"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -61,6 +72,9 @@ class Settings(BaseSettings):
 
     # ── Data platform ─────────────────────────────────────
     data: DataSettings = Field(default_factory=DataSettings)
+
+    # ── Local LLM (Ollama) ─────────────────────────────────
+    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
 
     # ── Paths ─────────────────────────────────────────────
     config_dir: Path = Path("config")  # user-editable YAML config (see user_config.py)

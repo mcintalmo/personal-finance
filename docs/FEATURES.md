@@ -26,7 +26,7 @@
 
 ## 4. Categorization
 - [x] Rules engine: user-editable YAML merchant/pattern → category rules
-- [ ] Embedding-similarity classifier vs. labeled history (nomic-embed-text via Ollama)
+- [x] Embedding-similarity classifier vs. labeled history (nomic-embed-text via Ollama)
 - [ ] Local LLM fallback for the ambiguous tail
 - [ ] Human review queue for low-confidence assignments; corrections stored as labels and fed back to the classifier
 - [ ] Category rollups through the hierarchy at every level

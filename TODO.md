@@ -14,9 +14,7 @@
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Embedding-similarity classifier vs. labeled history (nomic-embed-text via
-      Ollama) — picks up transactions absent from silver_transaction_categories
-- [ ] Local LLM fallback for the ambiguous tail
+- [ ] ⏳ IN PROGRESS — Local LLM fallback for the ambiguous tail
 - [ ] Human review queue for low-confidence assignments; corrections stored as labels and fed
       back to the classifier
 - [ ] Category rollups through the hierarchy at every level (gold mart over
@@ -41,6 +39,28 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Embedding-similarity classifier: stage 2 of the categorization cascade. `pf enrich` embeds
+      every distinct merchant not yet cached via a local Ollama call (new `personal_finance.embed`
+      module — `httpx`-based `EmbeddingClient`, `settings.ollama.*`), caching vectors in a new
+      `merchant_embeddings` table (keyed by (merchant_name, model), so re-running never re-embeds
+      what's already cached). A new dbt model, `silver_transaction_categories_embedding`, matches
+      each merchant stage 1 missed against the nearest rule-categorized merchant by
+      `list_cosine_similarity`, assigning its category when the score clears
+      `embedding_confidence_threshold` (dbt var, default 0.80) — confidence is the real similarity
+      score, unlike stage 1's flat 1.0. `silver_transaction_categories_all` unions every stage so
+      far (disjoint by construction) — the "every transaction categorized with confidence +
+      provenance" view PLAN.md's Phase 4 demo checks. Requires `pf transform` (builds
+      silver_transactions) → `pf enrich` (embeds) → `pf transform` again (builds the
+      embedding-stage model against the now-cached vectors). Live-verified end-to-end against a
+      real local Ollama server; dbt-side matching logic also covered by tests using hand-crafted
+      synthetic vectors (known-exact cosine similarities), independent of any specific embedding
+      model's behavior — `src/personal_finance/embed.py`,
+      `transform/models/silver/silver_transaction_categories_embedding.sql` (2026-07-21).
+      **Note:** hit a real bug in a stale, long-running local Ollama server (client v0.31.1
+      installed vs. server v0.24.0 actually running) where `nomic-embed-text` collapsed unrelated
+      short merchant names to byte-identical vectors; confirmed via a second model
+      (`embeddinggemma`) on the same server, which embedded correctly — restarting the Ollama
+      background process should resolve it. Not a bug in this project's code.
 - [x] Rules engine: `silver_transaction_categories` (stage 1 of the categorization cascade)
       applies config-driven pattern→category rules over `silver_transactions`. Rules are seeded
       from `rules.yaml` into a new `rules` table (`seed_rules`, wired into `pf init-db`; full
