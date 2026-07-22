@@ -59,8 +59,16 @@ one phase at a time when the previous phase's demo is complete.
       **Note:** hit a real bug in a stale, long-running local Ollama server (client v0.31.1
       installed vs. server v0.24.0 actually running) where `nomic-embed-text` collapsed unrelated
       short merchant names to byte-identical vectors; confirmed via a second model
-      (`embeddinggemma`) on the same server, which embedded correctly — restarting the Ollama
-      background process should resolve it. Not a bug in this project's code.
+      (`embeddinggemma`) on the same server, which embedded correctly. **Resolved** by restarting
+      the Ollama app (now v0.32.1) — reran the full pipeline against the fixed server and confirmed
+      properly differentiated, semantically sane embeddings (e.g. NETFLIX↔SPOTIFY scored highest at
+      0.586, both streaming). With the real model working, the 20-merchant demo's genuine best
+      cross-merchant matches top out around 0.54 (STARBUCKS↔TRADER JOE'S) — below the conservative
+      0.80 default, so stage 2 correctly declines to guess rather than assign a shaky category; this
+      is the threshold working as designed (wrong auto-categorization is worse than leaving a
+      transaction for the LLM-fallback/human-review stages), not a bug. Confirmed the mechanism
+      itself is sound by sweeping `embedding_confidence_threshold` down and inspecting real
+      (sub-threshold) similarity scores.
 - [x] Rules engine: `silver_transaction_categories` (stage 1 of the categorization cascade)
       applies config-driven pattern→category rules over `silver_transactions`. Rules are seeded
       from `rules.yaml` into a new `rules` table (`seed_rules`, wired into `pf init-db`; full
