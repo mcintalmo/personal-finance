@@ -21,6 +21,9 @@ from personal_finance.models import (
     Link,
     LinkType,
     Merchant,
+    MerchantEmbedding,
+    MerchantLlmCategory,
+    Rule,
     Transaction,
     TransactionSplit,
 )
@@ -29,6 +32,9 @@ EXPECTED_TABLES = {
     "accounts",
     "merchants",
     "categories",
+    "rules",
+    "merchant_embeddings",
+    "merchant_llm_categories",
     "transactions",
     "transaction_splits",
     "documents",
@@ -80,6 +86,21 @@ class TestRoundTrip:
         merchant = Merchant(canonical_name="Trader Joe's", aliases=["TRADER JOES #123"])
         root = Category(name="essentials")
         groceries = Category(name="groceries", parent_id=root.id)
+        rule = Rule(
+            pattern="(?i)trader joe",
+            applies_to="merchant_name",
+            category_id=groceries.id,
+            priority=0,
+        )
+        merchant_embedding = MerchantEmbedding(
+            merchant_name="TRADER JOE'S", model="nomic-embed-text", embedding=[0.1, 0.2, 0.3]
+        )
+        merchant_llm_category = MerchantLlmCategory(
+            merchant_name="TRADER JOE'S",
+            model="qwen2.5:3b",
+            category_id=groceries.id,
+            confidence=0.85,
+        )
         txn = Transaction(
             account_id=account.id,
             posted_on=date(2026, 7, 1),
@@ -119,6 +140,9 @@ class TestRoundTrip:
         insert(conn, "merchants", merchant)
         insert(conn, "categories", root)
         insert(conn, "categories", groceries)
+        insert(conn, "rules", rule)
+        insert(conn, "merchant_embeddings", merchant_embedding)
+        insert(conn, "merchant_llm_categories", merchant_llm_category)
         insert(conn, "transactions", txn)
         insert(conn, "transaction_splits", split)
         insert(conn, "documents", doc, parsed_payload=json.dumps({"total": "42.50"}))

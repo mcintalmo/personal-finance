@@ -8,6 +8,27 @@ sources:
     tables:
       - name: categories
         description: Hierarchical taxonomy seeded from config taxonomy.yaml.
+      - name: rules
+        description: >-
+          Deterministic pattern → category rules seeded from config rules.yaml
+          (personal_finance.seed.seed_rules); priority is file order, first
+          match wins.
+      - name: merchant_embeddings
+        description: >-
+          Cached embedding vector per distinct merchant_name, computed via a
+          local Ollama call (personal_finance.embed.compute_missing_embeddings,
+          `pf enrich`) and reused across runs.
+      - name: merchant_llm_categories
+        description: >-
+          Cached LLM category choice per distinct merchant_name, computed via
+          a local Ollama chat call
+          (personal_finance.llm_categorize.compute_missing_llm_categories,
+          `pf classify`) and reused across runs.
+      - name: labels
+        description: >-
+          Human categorization corrections (personal_finance.review.record_label,
+          `pf review label`) — training data for future classifier
+          improvements, and the highest-priority categorization stage.
 
   # Bronze = raw source exports landed as Parquet by dlt (Phase 2). Read as a
   # single config-free glob over every source directory: a new bank/source

@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from personal_finance.cli import app
 from personal_finance.config import get_settings
+from personal_finance.exceptions import ExternalServiceError
 
 runner = CliRunner()
 
@@ -23,7 +24,17 @@ def fresh_settings(monkeypatch, tmp_path):
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("synth", "init-db", "transform", "ingest", "watch", "deposit", "enrich"):
+    for command in (
+        "synth",
+        "init-db",
+        "transform",
+        "ingest",
+        "watch",
+        "deposit",
+        "enrich",
+        "classify",
+        "review",
+    ):
         assert command in result.output
 
 
@@ -53,9 +64,12 @@ class TestInitDb:
         warehouse = get_settings().data.warehouse_path
         assert warehouse.exists()
         with duckdb.connect(str(warehouse)) as conn:
-            (count,) = conn.execute("select count(*) from categories").fetchone()
-        assert count > 0
-        assert "categories seeded" in result.output
+            (categories,) = conn.execute("select count(*) from categories").fetchone()
+            (rules,) = conn.execute("select count(*) from rules").fetchone()
+        assert categories > 0
+        assert rules > 0
+        assert "categories" in result.output
+        assert "rules seeded" in result.output
 
     def test_is_idempotent(self):
         first = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
@@ -130,10 +144,232 @@ class TestDeposit:
         assert "File not found" in result.output
 
 
-def test_enrich_stub_exits_with_pointer_to_plan():
-    result = runner.invoke(app, ["enrich"])
-    assert result.exit_code == 2
-    assert "not implemented" in result.output
+class TestEnrich:
+    def test_requires_initialized_warehouse(self):
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def test_requires_transform_has_run(self):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 1
+        assert "pf transform" in result.output
+
+    def _build_transformed_warehouse(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "exports" / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_embeds_and_reports_count(self, monkeypatch, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def embed(self, texts):
+                return [[float(len(t)), 0.0] for t in texts]
+
+        monkeypatch.setattr("personal_finance.cli.EmbeddingClient", lambda *a, **k: FakeClient())
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 0, result.output
+        assert "Embedded" in result.output
+        assert "pf transform" in result.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            (count,) = conn.execute("select count(*) from merchant_embeddings").fetchone()
+        assert count > 0
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_ollama_failure_exits_nonzero(self, monkeypatch, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+
+        class FailingClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def embed(self, texts):
+                raise ExternalServiceError("Ollama unreachable")
+
+        monkeypatch.setattr("personal_finance.cli.EmbeddingClient", lambda *a, **k: FailingClient())
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 1
+        assert "Embedding failed" in result.output
+
+
+class TestClassify:
+    def test_requires_initialized_warehouse(self):
+        result = runner.invoke(app, ["classify"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def test_requires_transform_has_run(self):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["classify"])
+        assert result.exit_code == 1
+        assert "pf transform" in result.output
+
+    def _build_transformed_warehouse(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "exports" / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_classifies_and_reports_count(self, monkeypatch, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def classify(self, merchant_name, category_paths):
+                return category_paths[0], 0.9
+
+        monkeypatch.setattr(
+            "personal_finance.cli.LlmCategorizeClient", lambda *a, **k: FakeClient()
+        )
+        result = runner.invoke(app, ["classify"])
+        assert result.exit_code == 0, result.output
+        assert "Classified" in result.output
+        assert "pf transform" in result.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            (count,) = conn.execute("select count(*) from merchant_llm_categories").fetchone()
+        assert count > 0
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_ollama_failure_exits_nonzero(self, monkeypatch, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+
+        class FailingClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def classify(self, merchant_name, category_paths):
+                raise ExternalServiceError("Ollama unreachable")
+
+        monkeypatch.setattr(
+            "personal_finance.cli.LlmCategorizeClient", lambda *a, **k: FailingClient()
+        )
+        result = runner.invoke(app, ["classify"])
+        assert result.exit_code == 1
+        assert "Classification failed" in result.output
+
+
+class TestReview:
+    def test_requires_initialized_warehouse(self):
+        result = runner.invoke(app, ["review", "list"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def test_requires_transform_has_run(self):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["review", "list"])
+        assert result.exit_code == 1
+        assert "pf transform" in result.output
+
+    def _build_transformed_warehouse(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "exports" / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_lists_uncategorized_transactions(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        result = runner.invoke(app, ["review", "list"])
+        assert result.exit_code == 0, result.output
+        assert "awaiting review" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_labels_a_transaction_and_removes_it_from_the_queue(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        before = runner.invoke(app, ["review", "list", "--limit", "1000"])
+        assert before.exit_code == 0, before.output
+        transaction_id = before.output.splitlines()[0].split()[0]
+
+        label = runner.invoke(app, ["review", "label", transaction_id, "essentials/groceries"])
+        assert label.exit_code == 0, label.output
+        assert "Labeled" in label.output
+
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            row = conn.execute(
+                "select categorization_source from main_silver.silver_transaction_categories_all "
+                "where transaction_id = $id",
+                {"id": transaction_id},
+            ).fetchone()
+        assert row == ("human",)
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_unknown_transaction_exits_nonzero(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        result = runner.invoke(app, ["review", "label", "does-not-exist", "essentials/groceries"])
+        assert result.exit_code == 1
+        assert "No such transaction" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_unknown_category_path_exits_nonzero(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        before = runner.invoke(app, ["review", "list", "--limit", "1000"])
+        transaction_id = before.output.splitlines()[0].split()[0]
+        result = runner.invoke(app, ["review", "label", transaction_id, "not/a/real/path"])
+        assert result.exit_code == 1
+        assert "Unknown category path" in result.output
 
 
 class TestWatch:

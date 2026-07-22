@@ -11,7 +11,9 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf ingest      load source export files into the bronze layer
     pf watch       watch a folder and ingest exports as they are dropped in
     pf deposit     atomically place a completed file into a watched folder
-    pf enrich      (Phase 4 stub)
+    pf enrich      embed merchants for the embedding-similarity categorization stage
+    pf classify    ask a local LLM to categorize merchants stages 1-2 missed
+    pf review      list the categorization cascade's ambiguous tail and record corrections
 """
 
 import os
@@ -23,7 +25,8 @@ import typer
 
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
-from personal_finance.exceptions import ConfigurationError
+from personal_finance.embed import EmbeddingClient, compute_missing_embeddings
+from personal_finance.exceptions import ConfigurationError, ExternalServiceError, NotFoundError
 from personal_finance.ingest import (
     IngestOutcome,
     IngestStatus,
@@ -31,7 +34,13 @@ from personal_finance.ingest import (
     ingest_file,
     watch_folder,
 )
-from personal_finance.seed import seed_categories
+from personal_finance.llm_categorize import (
+    LlmCategorizeClient,
+    compute_missing_llm_categories,
+    fetch_category_paths,
+)
+from personal_finance.review import fetch_review_queue, record_label
+from personal_finance.seed import seed_categories, seed_rules
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver
@@ -49,6 +58,14 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+review_app = typer.Typer(
+    name="review",
+    help="List the categorization cascade's ambiguous tail and record human corrections.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(review_app)
 
 
 @app.command()
@@ -74,7 +91,7 @@ def init_db(
         None, help="User config directory (default: Settings.config_dir)."
     ),
 ) -> None:
-    """Create the warehouse schema and seed the category taxonomy."""
+    """Create the warehouse schema and seed the category taxonomy and rules."""
     warehouse = get_settings().data.warehouse_path
     try:
         config = load_user_config(config_dir)
@@ -85,7 +102,8 @@ def init_db(
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
         categories = seed_categories(conn, config.taxonomy)
-    typer.echo(f"Initialized {warehouse}: {len(categories)} categories seeded")
+        rules = seed_rules(conn, config.rules)
+    typer.echo(f"Initialized {warehouse}: {len(categories)} categories, {len(rules)} rules seeded")
 
 
 @app.command()
@@ -270,9 +288,170 @@ def deposit(
 
 
 @app.command()
-def enrich() -> None:
-    """Run the categorization/enrichment cascade (Phase 4 — not implemented)."""
-    typer.echo(
-        "pf enrich is not implemented yet — planned for Phase 4 (see docs/PLAN.md).", err=True
-    )
-    raise typer.Exit(code=2)
+def enrich(
+    base_url: str | None = typer.Option(
+        None, help="Ollama server URL (default: Settings.ollama.base_url)."
+    ),
+    model: str | None = typer.Option(
+        None, help="Embedding model (default: Settings.ollama.embedding_model)."
+    ),
+) -> None:
+    """Embed every distinct merchant not yet cached, for the embedding-similarity
+    categorization stage.
+
+    Requires `pf transform` to have run at least once (reads
+    silver_transactions.merchant_name) and a local Ollama server with the
+    embedding model pulled. Re-run `pf transform` afterward to build
+    silver_transaction_categories_embedding against the newly cached vectors.
+    """
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        result = conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
+        ).fetchone()
+        if not result or not result[0]:
+            typer.echo(
+                "silver_transactions has not been built yet — run `pf transform` first.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        with EmbeddingClient(
+            base_url or settings.ollama.base_url, model or settings.ollama.embedding_model
+        ) as client:
+            try:
+                count = compute_missing_embeddings(
+                    conn, client, model or settings.ollama.embedding_model
+                )
+            except ExternalServiceError as exc:
+                typer.echo(f"Embedding failed: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Embedded {count} new merchant(s). Run `pf transform` to apply them.")
+
+
+@app.command()
+def classify(
+    base_url: str | None = typer.Option(
+        None, help="Ollama server URL (default: Settings.ollama.base_url)."
+    ),
+    model: str | None = typer.Option(
+        None, help="Chat model (default: Settings.ollama.chat_model)."
+    ),
+) -> None:
+    """Ask a local LLM to categorize merchants stages 1-2 (rules, embedding
+    similarity) missed — stage 3 of the categorization cascade.
+
+    Requires `pf transform` to have run at least once (reads
+    silver_transaction_categories/_embedding to see what's still
+    uncategorized) and a local Ollama server with the chat model pulled.
+    Re-run `pf transform` afterward to build silver_transaction_categories_llm
+    against the newly cached classifications.
+    """
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        result = conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
+        ).fetchone()
+        if not result or not result[0]:
+            typer.echo(
+                "silver_transactions has not been built yet — run `pf transform` first.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        with LlmCategorizeClient(
+            base_url or settings.ollama.base_url, model or settings.ollama.chat_model
+        ) as client:
+            try:
+                count = compute_missing_llm_categories(
+                    conn, client, model or settings.ollama.chat_model
+                )
+            except ExternalServiceError as exc:
+                typer.echo(f"Classification failed: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Classified {count} new merchant(s). Run `pf transform` to apply them.")
+
+
+def _require_transform_built(conn: duckdb.DuckDBPyConnection) -> None:
+    result = conn.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = 'main_silver' AND table_name = 'silver_transaction_categories_all'"
+    ).fetchone()
+    if not result or not result[0]:
+        typer.echo(
+            "silver_transaction_categories_all has not been built yet — run `pf transform` first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@review_app.command("list")
+def review_list(
+    limit: int = typer.Option(20, help="Max transactions to show."),
+) -> None:
+    """List transactions no cascade stage could confidently categorize.
+
+    Requires `pf transform` to have run at least once.
+    """
+    warehouse = get_settings().data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_transform_built(conn)
+        items = fetch_review_queue(conn, limit=limit)
+
+    if not items:
+        typer.echo("Nothing to review — every transaction is categorized.")
+        return
+    for item in items:
+        label = item.merchant_name or item.description_raw
+        typer.echo(
+            f"{item.transaction_id}  {item.posted_on}  {item.amount:>10}  {label} ({item.source})"
+        )
+    typer.echo(f"{len(items)} transaction(s) awaiting review.")
+
+
+@review_app.command("label")
+def review_label(
+    transaction_id: str = typer.Argument(..., help="transaction_id from `pf review list`."),
+    category_path: str = typer.Argument(
+        ..., help="Slash-separated category path, e.g. essentials/groceries."
+    ),
+    note: str | None = typer.Option(None, help="Optional free-text context for this correction."),
+) -> None:
+    """Record a human category correction for one transaction.
+
+    Stored as a label; the categorization outranks every automated stage once
+    `pf transform` re-runs.
+    """
+    warehouse = get_settings().data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_transform_built(conn)
+        category_paths = fetch_category_paths(conn)
+        try:
+            record_label(conn, transaction_id, category_path, category_paths, note=note)
+        except NotFoundError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Labeled {transaction_id} -> {category_path}. Run `pf transform` to apply it.")

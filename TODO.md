@@ -14,8 +14,8 @@
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Rules engine: user-editable YAML merchant/pattern → category rules
-      (rules.yaml already exists — apply it over silver_transactions.merchant_name)
+- [ ] ⏳ IN PROGRESS — Category rollups through the hierarchy at every level (gold mart over
+      silver_transaction_categories + gold_category_paths)
 
 ## Backlog (later phases)
 
@@ -36,6 +36,114 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Human review queue: the final stage of the categorization cascade, and the highest
+      priority — unlike stages 1-3 (additive: each only covers what prior stages missed
+      entirely), a human correction can **override** an earlier stage's wrong assignment, not
+      just fill a gap. `pf review list [--limit N]` surfaces transactions no automated stage
+      could confidently place (most recent first); `pf review label TRANSACTION_ID
+      CATEGORY_PATH [--note TEXT]` records a correction as a `Label` (the existing
+      `subject_kind=transaction` entity, previously defined but unused) — new
+      `personal_finance.review` module (`fetch_review_queue`, `record_label`), reusing
+      `llm_categorize.fetch_category_paths` to validate/resolve the category path rather than
+      duplicating the recursive taxonomy query. A new dbt model,
+      `silver_transaction_categories_human`, keeps only the latest label per transaction (a
+      transaction can be corrected more than once) with a flat 1.0 confidence.
+      `silver_transaction_categories_all` now unions the human stage **first**, with every
+      automated stage's branch excluding what it covers — the one structural change other stages
+      needed; stages 1-3's own models are untouched, still reporting their original (possibly
+      since-overridden) assignment on their own. Requires `pf transform` → `pf review label` →
+      `pf transform` again — `src/personal_finance/review.py`,
+      `transform/models/silver/silver_transaction_categories_human.sql` (2026-07-22).
+      **Live-verified end-to-end** on the real demo pipeline: reviewed the tail `pf classify`
+      left (Venmo cash-outs, emoji-containing notes, ambiguous card-payment/autopay pairs),
+      labeled one gap-filling correction (a THAI GINGER charge → `non-essentials/dining`) and one
+      override of an existing rule match (a KROGER transaction, originally `essentials/groceries`
+      by rule, relabeled `non-essentials/groceries`) — confirmed the combined view shows `human`
+      for both while `silver_transaction_categories` (stage 1) still reports its own original,
+      unmodified `rule` assignment underneath. **Phase 4 categorization cascade complete**: rules
+      → embedding similarity → local-LLM fallback → human review, each with its own dbt model
+      plus a combined view, all live-verified against real local services.
+- [x] Local-LLM fallback: stage 3 of the categorization cascade. `pf classify` asks a local
+      Ollama chat model (new `settings.ollama.chat_model`, default `phi3:mini` — already pulled
+      on this dev machine) to pick a category for every merchant stages 1-2 (rules, embedding
+      similarity) missed entirely, using structured JSON output (Ollama's `format` schema, no
+      free-text parsing) so the response is `{category, confidence}`. New
+      `personal_finance.llm_categorize` module — `LlmCategorizeClient` wraps `/api/chat`;
+      `compute_missing_llm_categories` reads what's still uncategorized from
+      `main_silver.silver_transaction_categories`/`_embedding`, asks once per distinct merchant,
+      and caches into a new `merchant_llm_categories` table (keyed by (merchant_name, model), same
+      idempotent-cache pattern as `merchant_embeddings`). Crucially, a merchant the model
+      classifies into a category **outside the given list** (a real, observed failure mode of a
+      small local model — see below) is left **uncached** rather than raising or trusting a
+      hallucinated category — same "decline to guess" contract as stage 2's confidence gate, just
+      enforced by membership-in-list instead of a numeric threshold. A new dbt model,
+      `silver_transaction_categories_llm`, gates cached classifications by self-reported
+      `confidence` clearing `llm_confidence_threshold` (dbt var, default 0.50).
+      `silver_transaction_categories_all` now unions all three stages (still disjoint by
+      construction). Requires `pf transform` → `pf classify` (asks + caches) → `pf transform` again
+      (builds the LLM-stage model against the newly cached classifications) —
+      `src/personal_finance/llm_categorize.py`,
+      `transform/models/silver/silver_transaction_categories_llm.sql` (2026-07-22). **Live-verified
+      end-to-end** against a real local `phi3:mini` on the full demo pipeline: of ~21 merchants
+      stages 1-2 left uncategorized, only CHIPOTLE (a clean, unambiguous name) was confidently
+      classified (`non-essentials/dining`, confidence 0.95) — the harder/noisier remainder
+      (raw-ish descriptors, emoji, ambiguous strings like "PAYMENT THANK YOU -") were **declined**
+      because the model's response named a category outside the given list, not cached, left for
+      human review. This is the safety mechanism working as designed on a small, imperfect local
+      model — no bad categorizations were ever written — not a defect; a stronger chat model
+      (swappable via `settings.ollama.chat_model` / `pf classify --model`) should confidently cover
+      more of the tail. The dbt-side gating logic is also covered by tests using a hand-crafted
+      synthetic classification (independent of any specific chat model's behavior).
+- [x] Embedding-similarity classifier: stage 2 of the categorization cascade. `pf enrich` embeds
+      every distinct merchant not yet cached via a local Ollama call (new `personal_finance.embed`
+      module — `httpx`-based `EmbeddingClient`, `settings.ollama.*`), caching vectors in a new
+      `merchant_embeddings` table (keyed by (merchant_name, model), so re-running never re-embeds
+      what's already cached). A new dbt model, `silver_transaction_categories_embedding`, matches
+      each merchant stage 1 missed against the nearest rule-categorized merchant by
+      `list_cosine_similarity`, assigning its category when the score clears
+      `embedding_confidence_threshold` (dbt var, default 0.80) — confidence is the real similarity
+      score, unlike stage 1's flat 1.0. `silver_transaction_categories_all` unions every stage so
+      far (disjoint by construction) — the "every transaction categorized with confidence +
+      provenance" view PLAN.md's Phase 4 demo checks. Requires `pf transform` (builds
+      silver_transactions) → `pf enrich` (embeds) → `pf transform` again (builds the
+      embedding-stage model against the now-cached vectors). Live-verified end-to-end against a
+      real local Ollama server; dbt-side matching logic also covered by tests using hand-crafted
+      synthetic vectors (known-exact cosine similarities), independent of any specific embedding
+      model's behavior — `src/personal_finance/embed.py`,
+      `transform/models/silver/silver_transaction_categories_embedding.sql` (2026-07-21).
+      **Note:** hit a real bug in a stale, long-running local Ollama server (client v0.31.1
+      installed vs. server v0.24.0 actually running) where `nomic-embed-text` collapsed unrelated
+      short merchant names to byte-identical vectors; confirmed via a second model
+      (`embeddinggemma`) on the same server, which embedded correctly. **Resolved** by restarting
+      the Ollama app (now v0.32.1) — reran the full pipeline against the fixed server and confirmed
+      properly differentiated, semantically sane embeddings (e.g. NETFLIX↔SPOTIFY scored highest at
+      0.586, both streaming). With the real model working, the 20-merchant demo's genuine best
+      cross-merchant matches top out around 0.54 (STARBUCKS↔TRADER JOE'S) — below the conservative
+      0.80 default, so stage 2 correctly declines to guess rather than assign a shaky category; this
+      is the threshold working as designed (wrong auto-categorization is worse than leaving a
+      transaction for the LLM-fallback/human-review stages), not a bug. Confirmed the mechanism
+      itself is sound by sweeping `embedding_confidence_threshold` down and inspecting real
+      (sub-threshold) similarity scores.
+- [x] Rules engine: `silver_transaction_categories` (stage 1 of the categorization cascade)
+      applies config-driven pattern→category rules over `silver_transactions`. Rules are seeded
+      from `rules.yaml` into a new `rules` table (`seed_rules`, wired into `pf init-db`; full
+      replace on reseed — unlike categories, rules have no user-editable state to preserve).
+      `category_id` is resolved via the existing deterministic `category_id_for_path` (no need for
+      a gold-layer join). First match wins by file order (`priority`). `RuleConfig.applies_to` is
+      now a validated enum (`description_raw`/`merchant_name`/`source`/`account_name`, default
+      `merchant_name` — the cleaned, less-noisy target) instead of a free string, and its pattern
+      is validated against **DuckDB's own RE2 engine**, not Python's `re` — they differ (no
+      backreferences/lookaround; a mid-pattern `(?i)` doesn't apply globally), so a bad pattern now
+      fails at config load instead of deep in a dbt build. Grain: at most one row per
+      transaction_id (matched only); absent = not yet categorized, ready for the embedding/LLM
+      stages to pick up. Hit and fixed a real DuckDB 1.5.4 engine bug along the way: a `CASE`
+      picking one of several text columns, then `regexp_matches`-ed inside a cross join, could
+      **segfault** (SIGSEGV) on a value containing a multi-byte character (an emoji in a Venmo
+      note) — reproduced via real `dbt build` runs (not just isolated queries), fixed by
+      restructuring to one `UNION ALL` branch per `applies_to` value instead of a `CASE`, and
+      stress-tested crash-free across 18+ real builds with the emoji fixture intact — `ddl.py`,
+      `models.py` (new `Rule` entity), `seed.py`, `user_config.py`,
+      `transform/models/silver/silver_transaction_categories.sql` (2026-07-19)
 - [x] Transfer detection: `silver_transfers` correlates paired inter-account movements — an
       outflow and inflow that negate (equal magnitude, opposite sign), same currency, different
       accounts, within `transfer_window_days` (dbt var, default 3). Matched 1:1 via mutually-best

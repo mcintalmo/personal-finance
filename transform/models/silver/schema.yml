@@ -97,6 +97,162 @@ models:
               arguments:
                 values: [high, medium]
 
+  - name: silver_transaction_categories
+    description: >-
+      Stage 1 (rules) of the categorization cascade — one row per transaction
+      that a config rule matched. A transaction absent here is uncategorized by
+      this stage; later cascade stages pick up the remainder.
+    columns:
+      - name: transaction_id
+        description: >-
+          One row per matched transaction; absent = not matched by any rule.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: rule_id
+        data_tests: [not_null]
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_transaction_categories_embedding
+    description: >-
+      Stage 2 (embedding similarity) of the categorization cascade — one row
+      per transaction whose merchant matched a rule-categorized merchant by
+      cosine similarity above the confidence threshold. Candidacy is
+      transaction-level: only covers transactions stage 1 missed, even if
+      other transactions of the same merchant were rule-matched (e.g. via an
+      account_name/source rule rather than merchant_name).
+    columns:
+      - name: transaction_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_transaction_categories_llm
+    description: >-
+      Stage 3 (local-LLM fallback) of the categorization cascade — one row per
+      transaction whose merchant a local Ollama chat model classified with
+      confidence above the threshold. Only covers merchants stages 1-2 missed
+      entirely.
+    columns:
+      - name: transaction_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_transaction_categories_human
+    description: >-
+      The human-review stage of the categorization cascade — corrections
+      recorded via `pf review label`. The highest-priority stage: it can
+      override an earlier stage's assignment, not just fill a gap. A
+      transaction corrected more than once keeps only its latest label.
+    columns:
+      - name: transaction_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_transaction_categories_all
+    description: >-
+      Every transaction categorized so far, across every cascade stage
+      (human corrections, then rules + embedding similarity + local-LLM
+      fallback) — the union PLAN.md's Phase 4 demo checks. Absent = not yet
+      categorized by any stage.
+    columns:
+      - name: transaction_id
+        description: One row per categorized transaction, across all stages.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests: [not_null]
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
   - name: silver_merchants
     description: >-
       Merchant dimension — one row per distinct cleaned merchant_name, derived

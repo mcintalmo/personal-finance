@@ -4,8 +4,8 @@ import duckdb
 import pytest
 
 from personal_finance.ddl import create_schema
-from personal_finance.seed import seed_categories
-from personal_finance.user_config import TaxonomyNode, category_id_for_path
+from personal_finance.seed import seed_categories, seed_rules
+from personal_finance.user_config import RuleConfig, TaxonomyNode, category_id_for_path
 
 
 @pytest.fixture
@@ -94,3 +94,50 @@ class TestSeedCategories:
             {"id": category_id_for_path("income")},
         ).fetchone()
         assert note == "my note"
+
+
+RULES = [
+    RuleConfig(pattern="(?i)kroger|safeway", category="essentials/groceries"),
+    RuleConfig(pattern="(?i)netflix", category="income", applies_to="source"),
+]
+
+
+def count_rules(conn):
+    return conn.execute("SELECT count(*) FROM rules").fetchone()[0]
+
+
+class TestSeedRules:
+    def test_seeds_all_rules_in_priority_order(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seeded = seed_rules(conn, RULES)
+        assert count_rules(conn) == 2
+        assert [r.priority for r in seeded] == [0, 1]
+        assert [r.pattern for r in seeded] == ["(?i)kroger|safeway", "(?i)netflix"]
+
+    def test_category_id_resolved_from_path(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seeded = seed_rules(conn, RULES)
+        assert seeded[0].category_id == category_id_for_path("essentials/groceries")
+        assert seeded[1].category_id == category_id_for_path("income")
+
+    def test_applies_to_defaults_to_merchant_name(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seeded = seed_rules(conn, RULES)
+        assert seeded[0].applies_to == "merchant_name"
+        assert seeded[1].applies_to == "source"
+
+    def test_reseeding_fully_replaces(self, conn):
+        """Unlike categories, rules have no note to preserve — a shrunk or
+        reordered rule list is reflected exactly, not merged."""
+        seed_categories(conn, TAXONOMY)
+        seed_rules(conn, RULES)
+        reseeded = seed_rules(conn, [RULES[1]])
+        assert count_rules(conn) == 1
+        assert reseeded[0].pattern == "(?i)netflix"
+        assert reseeded[0].priority == 0  # reflects its new (only) position
+
+    def test_reordering_changes_priority(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seed_rules(conn, list(reversed(RULES)))
+        rows = conn.execute("SELECT pattern, priority FROM rules ORDER BY priority").fetchall()
+        assert rows == [("(?i)netflix", 0), ("(?i)kroger|safeway", 1)]

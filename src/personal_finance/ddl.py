@@ -63,6 +63,49 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "rules",
+        """
+        CREATE TABLE IF NOT EXISTS rules (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            pattern TEXT NOT NULL,
+            applies_to TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            note TEXT
+        )
+        """,
+    ),
+    (
+        "merchant_embeddings",
+        """
+        CREATE TABLE IF NOT EXISTS merchant_embeddings (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            merchant_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            embedding DOUBLE[] NOT NULL,
+            note TEXT,
+            UNIQUE (merchant_name, model)
+        )
+        """,
+    ),
+    (
+        "merchant_llm_categories",
+        """
+        CREATE TABLE IF NOT EXISTS merchant_llm_categories (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            merchant_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            confidence DOUBLE NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+            note TEXT,
+            UNIQUE (merchant_name, model)
+        )
+        """,
+    ),
+    (
         "transactions",
         """
         CREATE TABLE IF NOT EXISTS transactions (

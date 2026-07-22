@@ -14,6 +14,18 @@ vars:
   # How many days apart the two legs of an inter-account transfer may post
   # (ACH can settle a day or two after it leaves). See silver_transfers.
   transfer_window_days: 3
+  # Embedding-similarity categorization stage (must match Settings.ollama.
+  # embedding_model / `pf enrich`, since that's what merchant_embeddings.model
+  # holds). Below this cosine-similarity score, a candidate merchant's nearest
+  # match is too weak to trust — left uncategorized for a later stage instead.
+  embedding_model: nomic-embed-text
+  embedding_confidence_threshold: 0.80
+  # Local-LLM fallback categorization stage (must match Settings.ollama.
+  # chat_model / `pf classify`, since that's what merchant_llm_categories.model
+  # holds). Below this self-reported confidence, the LLM's guess is too weak
+  # to trust — left uncategorized for a later stage (human review) instead.
+  llm_model: phi3:mini
+  llm_confidence_threshold: 0.50
 
 clean-targets:
   - target

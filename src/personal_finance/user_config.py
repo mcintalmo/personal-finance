@@ -20,12 +20,12 @@ finances. Committed dummy templates live in ``config/examples/``; copy them in
 with ``cp config/examples/*.yaml config/`` (see ``config/README.md``).
 """
 
-import re
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, uuid5
 
+import duckdb
 import yaml
 
 if TYPE_CHECKING:
@@ -148,19 +148,43 @@ class TaxonomyNode(_ConfigModel):
         return value
 
 
-class RuleConfig(_ConfigModel):
-    """A deterministic categorization rule: regex match → category path."""
+class RuleApplyField(StrEnum):
+    """Transaction fields a rule's pattern may be matched against."""
 
-    pattern: str = Field(min_length=1)  # regular expression, matched case-sensitively
+    DESCRIPTION_RAW = "description_raw"
+    MERCHANT_NAME = "merchant_name"
+    SOURCE = "source"
+    ACCOUNT_NAME = "account_name"
+
+
+class RuleConfig(_ConfigModel):
+    """A deterministic categorization rule: regex match → category path.
+
+    Rules are applied in file order (first match wins) against
+    ``silver_transactions`` by the ``silver_transaction_categories`` dbt model —
+    see transform/models/silver/silver_transaction_categories.sql.
+    """
+
+    # Regular expression, matched case-sensitively by default — prepend (?i)
+    # (as every pattern in config/examples/rules.yaml does) for case-insensitive matching.
+    pattern: str = Field(min_length=1)
     category: str  # slash-separated taxonomy path
-    applies_to: str = "description_raw"  # transaction field the pattern runs against
+    # merchant_name (normalize_merchant's cleaned key) is the recommended target —
+    # less noisy than the raw descriptor, so patterns need fewer variants.
+    applies_to: RuleApplyField = RuleApplyField.MERCHANT_NAME
 
     @field_validator("pattern")
     @classmethod
     def _pattern_compiles(cls, value: str) -> str:
+        # Validated against DuckDB's own regex engine (RE2), not Python's `re`:
+        # they differ (RE2 has no backreferences/lookaround, and a mid-pattern
+        # inline flag like "a(?i)bc" is silently NOT equivalent to a leading
+        # one). A pattern that passes Python's re.compile can still error, or
+        # silently mismatch, when dbt actually runs it — better to fail here,
+        # at config load, than deep inside a dbt build.
         try:
-            re.compile(value)
-        except re.error as exc:
+            duckdb.sql("select regexp_matches('', ?)", params=[value])
+        except duckdb.Error as exc:
             msg = f"invalid regular expression {value!r}: {exc}"
             raise ValueError(msg) from exc
         return value

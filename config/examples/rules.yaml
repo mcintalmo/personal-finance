@@ -1,6 +1,10 @@
 # Deterministic categorization rules — stage 1 of the enrichment cascade.
-# First matching rule wins; patterns are regular expressions run against
-# `applies_to` (default: the raw transaction description).
+# First matching rule wins (file order = priority); patterns are regular
+# expressions (validated against DuckDB's own RE2 engine, not just Python's re
+# — see RuleConfig) matched against `applies_to` (default: merchant_name, the
+# normalize_merchant-cleaned key — less noisy than the raw description, so
+# patterns below need fewer variants). Other valid values: description_raw,
+# source, account_name.
 
 - pattern: "(?i)trader joe|kroger|safeway|aldi"
   category: essentials/groceries

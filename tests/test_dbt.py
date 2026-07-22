@@ -13,10 +13,17 @@ import duckdb
 import pytest
 
 from personal_finance.ddl import create_schema
+from personal_finance.embed import merchant_embedding_id
 from personal_finance.ingest import run_ingestion
-from personal_finance.seed import seed_categories
+from personal_finance.llm_categorize import merchant_llm_category_id
+from personal_finance.seed import seed_categories, seed_rules
 from personal_finance.synth import generate_scenario, write_scenario
-from personal_finance.user_config import load_user_config
+from personal_finance.user_config import (
+    RuleApplyField,
+    RuleConfig,
+    category_id_for_path,
+    load_user_config,
+)
 
 REPO_ROOT = Path(__file__).parent.parent
 EXAMPLES_CONFIG_DIR = REPO_ROOT / "config" / "examples"
@@ -52,6 +59,7 @@ def built_warehouse(tmp_path_factory):
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
         seed_categories(conn, config.taxonomy)
+        seed_rules(conn, config.rules)
 
     exports = root / "exports"
     write_scenario(generate_scenario(seed=42, months=2), exports)
@@ -79,6 +87,282 @@ def built_warehouse(tmp_path_factory):
     finally:
         monkeypatch.undo()
     return warehouse, bronze, config, result
+
+
+# Hand-crafted vectors (not real Ollama output) so expected cosine similarities
+# are known exactly, independent of any specific embedding model's behavior.
+# KROGER is a real stage-1-categorized merchant in this fixture
+# (essentials/groceries); STARBUCKS and CHIPOTLE are real stage-1-uncategorized
+# merchants — one deliberately a near-duplicate of KROGER (should match), one
+# orthogonal (should not).
+_TEST_EMBEDDING_MODEL = "test-embedding-model"
+_TEST_CONFIDENCE_THRESHOLD = 0.80
+_SYNTHETIC_EMBEDDINGS = {
+    "KROGER": [1.0, 0.0, 0.0],
+    "STARBUCKS": [0.99, 0.01, 0.0],  # cos with KROGER ≈ 0.9999 — clears threshold
+    "CHIPOTLE": [0.0, 1.0, 0.0],  # cos with KROGER = 0 — stays unmatched
+}
+
+
+@pytest.fixture(scope="module")
+def embedding_warehouse(built_warehouse):
+    """``built_warehouse`` plus synthetic ``merchant_embeddings``, with dbt
+    re-run (overriding the embedding vars) so the embedding-stage model picks
+    them up. Views are idempotently recreated, so rebuilding on top of the
+    already-built warehouse is safe.
+    """
+    warehouse, bronze, _config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        for name, vector in _SYNTHETIC_EMBEDDINGS.items():
+            conn.execute(
+                "INSERT INTO merchant_embeddings (id, created_at, merchant_name, model, embedding) "
+                "VALUES ($id, now(), $merchant_name, $model, $embedding)",
+                {
+                    "id": merchant_embedding_id(name, _TEST_EMBEDDING_MODEL),
+                    "merchant_name": name,
+                    "model": _TEST_EMBEDDING_MODEL,
+                    "embedding": vector,
+                },
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+_PARTIAL_MATCH_MERCHANT = "WIDGET SHOP"
+
+
+@pytest.fixture(scope="module")
+def partial_merchant_match_warehouse(tmp_path_factory):
+    """A small, self-contained warehouse: one merchant transacting on two
+    different accounts (Chase Checking, Capital One Card), plus one extra
+    rule targeting account_name rather than merchant_name — so only the
+    Capital-One-side transaction is rule-matched, leaving its Chase-side
+    sibling (same merchant_name) uncategorized by stage 1.
+
+    Regression fixture for a real bug: an earlier version of
+    silver_transaction_categories_embedding excluded a merchant from stage-2
+    candidacy entirely if *any* of its transactions were rule-matched, so the
+    Chase-side transaction would have been silently stranded. The fix makes
+    candidacy transaction-level. Built independently of ``built_warehouse``
+    (rather than reusing its 3-source synth scenario) since no merchant there
+    naturally spans two accounts.
+    """
+    root = tmp_path_factory.mktemp("wh_partial_match")
+    warehouse = root / "warehouse.duckdb"
+    bronze = root / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    sources = {s.name: s for s in config.sources}
+
+    exports = root / "exports"
+    exports.mkdir()
+    chase_csv = exports / "chase_checking.csv"
+    chase_csv.write_text(
+        f"Posting Date,Amount,Description\n01/15/2026,-25.00,{_PARTIAL_MATCH_MERCHANT}\n"
+    )
+    capital_one_csv = exports / "capital_one.csv"
+    capital_one_csv.write_text(
+        f"Posted Date,Debit,Credit,Description\n2026-01-16,30.00,0.00,{_PARTIAL_MATCH_MERCHANT}\n"
+    )
+    run_ingestion(sources["chase_checking"], chase_csv, bronze)
+    run_ingestion(sources["capital_one"], capital_one_csv, bronze)
+
+    rules = [
+        *config.rules,
+        RuleConfig(
+            pattern=r"(?i)^Capital One Card$",
+            applies_to=RuleApplyField.ACCOUNT_NAME,
+            category="non-essentials/dining",
+        ),
+    ]
+    with duckdb.connect(str(warehouse)) as conn:
+        create_schema(conn)
+        seed_categories(conn, config.taxonomy)
+        seed_rules(conn, rules)
+        conn.execute(
+            "INSERT INTO merchant_embeddings (id, created_at, merchant_name, model, embedding) "
+            "VALUES ($id, now(), $merchant_name, $model, $embedding)",
+            {
+                "id": merchant_embedding_id(_PARTIAL_MATCH_MERCHANT, _TEST_EMBEDDING_MODEL),
+                "merchant_name": _PARTIAL_MATCH_MERCHANT,
+                "model": _TEST_EMBEDDING_MODEL,
+                "embedding": [1.0],
+            },
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+# CHIPOTLE is the embedding stage's deliberately-unmatched merchant (see
+# _SYNTHETIC_EMBEDDINGS above) — the LLM stage picks it up from there. A
+# self-reported confidence rather than a real Ollama call, since the dbt-side
+# gating logic is what's under test here, not any specific chat model.
+_TEST_LLM_MODEL = "test-chat-model"
+_TEST_LLM_CONFIDENCE_THRESHOLD = 0.50
+_SYNTHETIC_LLM_CATEGORIES = {
+    "CHIPOTLE": ("non-essentials/dining", 0.9),
+}
+
+
+@pytest.fixture(scope="module")
+def llm_warehouse(embedding_warehouse, built_warehouse):
+    """``embedding_warehouse`` plus a synthetic ``merchant_llm_categories`` row,
+    with dbt re-run (overriding the LLM vars) so the LLM-stage model picks it
+    up.
+    """
+    warehouse = embedding_warehouse
+    _, bronze, _config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        for name, (path, confidence) in _SYNTHETIC_LLM_CATEGORIES.items():
+            conn.execute(
+                "INSERT INTO merchant_llm_categories "
+                "(id, created_at, merchant_name, model, category_id, confidence) "
+                "VALUES ($id, now(), $merchant_name, $model, $category_id, $confidence)",
+                {
+                    "id": merchant_llm_category_id(name, _TEST_LLM_MODEL),
+                    "merchant_name": name,
+                    "model": _TEST_LLM_MODEL,
+                    "category_id": category_id_for_path(path),
+                    "confidence": confidence,
+                },
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}, '
+                    f'"llm_model": "{_TEST_LLM_MODEL}", '
+                    f'"llm_confidence_threshold": {_TEST_LLM_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+@pytest.fixture(scope="module")
+def human_warehouse(llm_warehouse, built_warehouse):
+    """``llm_warehouse`` plus two human labels, with dbt re-run so the
+    human-review stage picks them up: one overriding an existing stage-1
+    (rule) assignment, one filling a gap no stage covered at all.
+    """
+    warehouse = llm_warehouse
+    _, bronze, _config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        (overridden_id,) = conn.execute(
+            """
+            select sc.transaction_id
+            from main_silver.silver_transaction_categories sc
+            join main_silver.silver_transactions t using (transaction_id)
+            where t.merchant_name = 'KROGER'
+            limit 1
+            """
+        ).fetchone()
+        (gap_id,) = conn.execute(
+            """
+            select transaction_id from main_silver.silver_transactions
+            where transaction_id not in (
+                select transaction_id from main_silver.silver_transaction_categories_all
+            )
+            limit 1
+            """
+        ).fetchone()
+        for transaction_id, path in (
+            (overridden_id, "non-essentials/dining"),
+            (gap_id, "non-essentials/entertainment/streaming"),
+        ):
+            conn.execute(
+                "INSERT INTO labels (id, created_at, subject_kind, subject_id, category_id) "
+                "VALUES (uuid()::text, now(), 'transaction', $subject_id, $category_id)",
+                {"subject_id": transaction_id, "category_id": category_id_for_path(path)},
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}, '
+                    f'"llm_model": "{_TEST_LLM_MODEL}", '
+                    f'"llm_confidence_threshold": {_TEST_LLM_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse, overridden_id, gap_id
 
 
 class TestDbtBuild:
@@ -274,3 +558,413 @@ class TestSilverTransfers:
                 "where amount < 0 and not is_transfer"
             ).fetchone()
         assert without_transfers < with_transfers
+
+
+class TestSilverTransactionCategories:
+    def test_matches_expected_categories(self, built_warehouse):
+        """Every merchant the example rules.yaml names lands in the right
+        category path, matched against merchant_name (the recommended,
+        cleaned target)."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select t.merchant_name, gc.path
+                from main_silver.silver_transaction_categories sc
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = sc.category_id
+                """
+            ).fetchall()
+        by_merchant = dict(rows)
+        assert by_merchant["ACME CORP PAYROLL"] == "income/salary"
+        assert by_merchant["KROGER"] == "essentials/groceries"
+        assert by_merchant["SAFEWAY"] == "essentials/groceries"
+        assert by_merchant["ALDI"] == "essentials/groceries"
+        assert by_merchant["TRADER JOE'S"] == "essentials/groceries"
+        assert by_merchant["SHELL OIL"] == "essentials/commute/gas"
+        assert by_merchant["CHEVRON"] == "essentials/commute/gas"
+        assert by_merchant["NETFLIX"] == "non-essentials/entertainment/streaming"
+        assert by_merchant["SPOTIFY"] == "non-essentials/entertainment/streaming"
+
+    def test_first_match_wins_by_priority(self, built_warehouse):
+        """Every categorized row used the lowest-priority (first-declared)
+        rule that matched — never a later one."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            bad = conn.execute(
+                """
+                select sc.transaction_id
+                from main_silver.silver_transaction_categories sc
+                join main.rules r on r.id = sc.rule_id
+                join main.rules better
+                    on better.priority < r.priority
+                where exists (
+                    select 1
+                    from main_silver.silver_transactions t
+                    where t.transaction_id = sc.transaction_id
+                    and (
+                        (better.applies_to = 'description_raw'
+                         and regexp_matches(t.description_raw, better.pattern))
+                        or (better.applies_to = 'merchant_name'
+                            and t.merchant_name is not null
+                            and regexp_matches(t.merchant_name, better.pattern))
+                        or (better.applies_to = 'source'
+                            and regexp_matches(t.source, better.pattern))
+                        or (better.applies_to = 'account_name'
+                            and regexp_matches(t.account_name, better.pattern))
+                    )
+                )
+                """
+            ).fetchall()
+        assert bad == []
+
+    def test_at_most_one_category_per_transaction(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories"
+            ).fetchone()
+        assert total == distinct
+
+    def test_uncategorized_transactions_absent_not_nulled(self, built_warehouse):
+        """A transaction with no matching rule (transfers, misc merchants,
+        emoji-containing Venmo notes) is simply absent from this stage — not a
+        row with a null category_id."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            total_tx = conn.execute(
+                "select count(*) from main_silver.silver_transactions"
+            ).fetchone()[0]
+            categorized = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories"
+            ).fetchone()[0]
+        assert 0 < categorized < total_tx
+
+    def test_emoji_containing_transactions_do_not_crash_and_stay_uncategorized(
+        self, built_warehouse
+    ):
+        """Regression test for a real DuckDB 1.5.4 engine crash (SIGSEGV) that
+        this model's query shape triggered when a value with a multi-byte
+        character (e.g. an emoji in a Venmo note) flowed through regexp_matches
+        inside the rule cross join. built_warehouse succeeding at all is most of
+        this test; we also confirm the emoji rows land as expected (no rule
+        matches them, so they're simply absent from this stage)."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            emoji_merchants = conn.execute(
+                r"""
+                select merchant_name
+                from main_silver.silver_transactions
+                where regexp_matches(merchant_name, '[^\x00-\x7F]')
+                """
+            ).fetchall()
+            categorized_ids = {
+                row[0]
+                for row in conn.execute(
+                    "select transaction_id from main_silver.silver_transaction_categories"
+                ).fetchall()
+            }
+            emoji_tx_ids = {
+                row[0]
+                for row in conn.execute(
+                    r"""
+                    select transaction_id
+                    from main_silver.silver_transactions
+                    where regexp_matches(merchant_name, '[^\x00-\x7F]')
+                    """
+                ).fetchall()
+            }
+        assert emoji_merchants  # the fixture does contain a multi-byte value
+        assert emoji_tx_ids.isdisjoint(categorized_ids)
+
+
+class TestSilverTransactionCategoriesEmbedding:
+    def test_near_duplicate_merchant_is_matched(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select e.matched_merchant, e.categorization_confidence
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'STARBUCKS'
+                """
+            ).fetchall()
+        assert rows, "STARBUCKS should have matched via embedding similarity"
+        for matched, confidence in rows:
+            assert matched == "KROGER"
+            assert confidence > 0.99
+
+    def test_orthogonal_merchant_stays_unmatched(self, embedding_warehouse):
+        """CHIPOTLE's embedding is orthogonal to every reference — similarity
+        0 is far below the threshold, so it must not appear in this stage."""
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            (count,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'CHIPOTLE'
+                """
+            ).fetchone()
+        assert count == 0
+
+    def test_matched_merchant_inherits_reference_category(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select gc.path
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = e.category_id
+                where t.merchant_name = 'STARBUCKS'
+                limit 1
+                """
+            ).fetchone()
+        assert row[0] == "essentials/groceries"  # inherited from KROGER
+
+    def test_grain_has_no_duplicates(self, embedding_warehouse):
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_embedding"
+            ).fetchone()
+        assert total == distinct
+
+    def test_never_recategorizes_a_stage1_transaction(self, embedding_warehouse):
+        """Stage 2 must only cover merchants stage 1 missed entirely."""
+        with duckdb.connect(str(embedding_warehouse)) as conn:
+            (overlap,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_embedding e
+                where e.transaction_id in (
+                    select transaction_id from main_silver.silver_transaction_categories
+                )
+                """
+            ).fetchone()
+        assert overlap == 0
+
+
+class TestSilverTransactionCategoriesEmbeddingPartialMerchantMatch:
+    """Regression coverage: a merchant with *some* rule-matched transactions
+    (via an account_name rule) must not be excluded wholesale from stage 2 —
+    its other, still-uncategorized transactions get their own chance."""
+
+    def test_leftover_transaction_is_still_a_candidate(self, partial_merchant_match_warehouse):
+        with duckdb.connect(str(partial_merchant_match_warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select e.categorization_confidence, gc.path
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = e.category_id
+                where t.merchant_name = $merchant and t.account_name <> 'Capital One Card'
+                """,
+                {"merchant": _PARTIAL_MATCH_MERCHANT},
+            ).fetchall()
+        assert rows, (
+            f"{_PARTIAL_MATCH_MERCHANT}'s non-Capital-One transaction should still have "
+            "matched via embedding similarity (a trivial self-match against its own "
+            "Capital-One-rule-assigned category), not been stranded"
+        )
+        for confidence, path in rows:
+            assert path == "non-essentials/dining"
+            assert confidence == pytest.approx(1.0)
+
+    def test_rule_matched_transaction_is_excluded_from_stage2(
+        self, partial_merchant_match_warehouse
+    ):
+        """The Capital One transaction is stage 1's, not stage 2's — no double count."""
+        with duckdb.connect(str(partial_merchant_match_warehouse)) as conn:
+            (count,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = $merchant and t.account_name = 'Capital One Card'
+                """,
+                {"merchant": _PARTIAL_MATCH_MERCHANT},
+            ).fetchone()
+        assert count == 0
+
+
+class TestSilverTransactionCategoriesLlm:
+    def test_chipotle_is_classified(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select l.categorization_confidence, gc.path
+                from main_silver.silver_transaction_categories_llm l
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = l.category_id
+                where t.merchant_name = 'CHIPOTLE'
+                """
+            ).fetchall()
+        assert rows, "CHIPOTLE should have been classified via the LLM stage"
+        for confidence, path in rows:
+            assert path == "non-essentials/dining"
+            assert confidence == pytest.approx(0.9)
+
+    def test_grain_has_no_duplicates(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_llm"
+            ).fetchone()
+        assert total == distinct
+
+    def test_never_recategorizes_a_stage1_or_stage2_transaction(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            (overlap,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_llm l
+                where l.transaction_id in (
+                    select transaction_id from main_silver.silver_transaction_categories
+                    union
+                    select transaction_id from main_silver.silver_transaction_categories_embedding
+                )
+                """
+            ).fetchone()
+        assert overlap == 0
+
+
+class TestSilverTransactionCategoriesAll:
+    def test_unions_all_three_stages_without_duplicates(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            stage1 = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories"
+            ).fetchone()[0]
+            stage2 = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories_embedding"
+            ).fetchone()[0]
+            stage3 = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories_llm"
+            ).fetchone()[0]
+            combined, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_all"
+            ).fetchone()
+        assert stage2 > 0  # sanity: the synthetic matches actually landed
+        assert stage3 > 0
+        assert combined == stage1 + stage2 + stage3
+        assert distinct == combined  # no transaction counted by more than one stage
+
+    def test_starbucks_appears_via_the_combined_view(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select a.categorization_source, a.categorization_confidence
+                from main_silver.silver_transaction_categories_all a
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'STARBUCKS'
+                limit 1
+                """
+            ).fetchone()
+        assert row == ("embedding", row[1])
+        assert row[1] > 0.99
+
+    def test_chipotle_appears_via_the_combined_view(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select a.categorization_source, a.categorization_confidence
+                from main_silver.silver_transaction_categories_all a
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'CHIPOTLE'
+                limit 1
+                """
+            ).fetchone()
+        assert row == ("llm", 0.9)
+
+
+class TestSilverTransactionCategoriesHuman:
+    def test_overridden_transaction_gets_the_human_category(self, human_warehouse):
+        warehouse, overridden_id, _gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select gc.path, h.categorization_confidence
+                from main_silver.silver_transaction_categories_human h
+                join main_gold.gold_category_paths gc on gc.id = h.category_id
+                where h.transaction_id = $id
+                """,
+                {"id": overridden_id},
+            ).fetchone()
+        assert row == ("non-essentials/dining", 1.0)
+
+    def test_gap_transaction_gets_the_human_category(self, human_warehouse):
+        warehouse, _overridden_id, gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select gc.path
+                from main_silver.silver_transaction_categories_human h
+                join main_gold.gold_category_paths gc on gc.id = h.category_id
+                where h.transaction_id = $id
+                """,
+                {"id": gap_id},
+            ).fetchone()
+        assert row == ("non-essentials/entertainment/streaming",)
+
+    def test_grain_has_no_duplicates(self, human_warehouse):
+        warehouse, _, _ = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_human"
+            ).fetchone()
+        assert total == distinct
+
+
+class TestSilverTransactionCategoriesAllWithHumanOverride:
+    def test_overridden_transaction_shows_human_not_rule(self, human_warehouse):
+        """KROGER's rule-assigned category loses to the human correction."""
+        warehouse, overridden_id, _gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select categorization_source, gc.path
+                from main_silver.silver_transaction_categories_all a
+                join main_gold.gold_category_paths gc on gc.id = a.category_id
+                where a.transaction_id = $id
+                """,
+                {"id": overridden_id},
+            ).fetchone()
+        assert row == ("human", "non-essentials/dining")
+
+    def test_gap_transaction_now_appears(self, human_warehouse):
+        warehouse, _overridden_id, gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select categorization_source, gc.path
+                from main_silver.silver_transaction_categories_all a
+                join main_gold.gold_category_paths gc on gc.id = a.category_id
+                where a.transaction_id = $id
+                """,
+                {"id": gap_id},
+            ).fetchone()
+        assert row == ("human", "non-essentials/entertainment/streaming")
+
+    def test_no_transaction_is_double_counted(self, human_warehouse):
+        warehouse, _, _ = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            combined, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_all"
+            ).fetchone()
+        assert combined == distinct
+
+    def test_rule_stage_itself_is_unaffected(self, human_warehouse):
+        """The human override only changes the combined view — silver_transaction_categories
+        (stage 1) still reports its own original assignment."""
+        warehouse, overridden_id, _gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (source,) = conn.execute(
+                "select categorization_source from main_silver.silver_transaction_categories "
+                "where transaction_id = $id",
+                {"id": overridden_id},
+            ).fetchone()
+        assert source == "rule"

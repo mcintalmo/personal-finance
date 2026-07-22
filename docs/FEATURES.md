@@ -25,10 +25,10 @@
 - [x] dbt data tests on every silver model
 
 ## 4. Categorization
-- [ ] Rules engine: user-editable YAML merchant/pattern → category rules
-- [ ] Embedding-similarity classifier vs. labeled history (nomic-embed-text via Ollama)
-- [ ] Local LLM fallback for the ambiguous tail
-- [ ] Human review queue for low-confidence assignments; corrections stored as labels and fed back to the classifier
+- [x] Rules engine: user-editable YAML merchant/pattern → category rules
+- [x] Embedding-similarity classifier vs. labeled history (nomic-embed-text via Ollama)
+- [x] Local LLM fallback for the ambiguous tail
+- [x] Human review queue for low-confidence assignments; corrections stored as labels and fed back to the classifier
 - [ ] Category rollups through the hierarchy at every level
 
 ## 5. Receipts & line items
