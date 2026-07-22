@@ -208,6 +208,71 @@ def llm_warehouse(embedding_warehouse, built_warehouse):
     return warehouse
 
 
+@pytest.fixture(scope="module")
+def human_warehouse(llm_warehouse, built_warehouse):
+    """``llm_warehouse`` plus two human labels, with dbt re-run so the
+    human-review stage picks them up: one overriding an existing stage-1
+    (rule) assignment, one filling a gap no stage covered at all.
+    """
+    warehouse = llm_warehouse
+    _, bronze, _config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        (overridden_id,) = conn.execute(
+            """
+            select sc.transaction_id
+            from main_silver.silver_transaction_categories sc
+            join main_silver.silver_transactions t using (transaction_id)
+            where t.merchant_name = 'KROGER'
+            limit 1
+            """
+        ).fetchone()
+        (gap_id,) = conn.execute(
+            """
+            select transaction_id from main_silver.silver_transactions
+            where transaction_id not in (
+                select transaction_id from main_silver.silver_transaction_categories_all
+            )
+            limit 1
+            """
+        ).fetchone()
+        for transaction_id, path in (
+            (overridden_id, "non-essentials/dining"),
+            (gap_id, "non-essentials/entertainment/streaming"),
+        ):
+            conn.execute(
+                "INSERT INTO labels (id, created_at, subject_kind, subject_id, category_id) "
+                "VALUES (uuid()::text, now(), 'transaction', $subject_id, $category_id)",
+                {"subject_id": transaction_id, "category_id": category_id_for_path(path)},
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}, '
+                    f'"llm_model": "{_TEST_LLM_MODEL}", '
+                    f'"llm_confidence_threshold": {_TEST_LLM_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse, overridden_id, gap_id
+
+
 class TestDbtBuild:
     def test_build_succeeds_including_data_tests(self, built_warehouse):
         _, _, _, result = built_warehouse
@@ -677,3 +742,94 @@ class TestSilverTransactionCategoriesAll:
                 """
             ).fetchone()
         assert row == ("llm", 0.9)
+
+
+class TestSilverTransactionCategoriesHuman:
+    def test_overridden_transaction_gets_the_human_category(self, human_warehouse):
+        warehouse, overridden_id, _gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select gc.path, h.categorization_confidence
+                from main_silver.silver_transaction_categories_human h
+                join main_gold.gold_category_paths gc on gc.id = h.category_id
+                where h.transaction_id = $id
+                """,
+                {"id": overridden_id},
+            ).fetchone()
+        assert row == ("non-essentials/dining", 1.0)
+
+    def test_gap_transaction_gets_the_human_category(self, human_warehouse):
+        warehouse, _overridden_id, gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select gc.path
+                from main_silver.silver_transaction_categories_human h
+                join main_gold.gold_category_paths gc on gc.id = h.category_id
+                where h.transaction_id = $id
+                """,
+                {"id": gap_id},
+            ).fetchone()
+        assert row == ("non-essentials/entertainment/streaming",)
+
+    def test_grain_has_no_duplicates(self, human_warehouse):
+        warehouse, _, _ = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_human"
+            ).fetchone()
+        assert total == distinct
+
+
+class TestSilverTransactionCategoriesAllWithHumanOverride:
+    def test_overridden_transaction_shows_human_not_rule(self, human_warehouse):
+        """KROGER's rule-assigned category loses to the human correction."""
+        warehouse, overridden_id, _gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select categorization_source, gc.path
+                from main_silver.silver_transaction_categories_all a
+                join main_gold.gold_category_paths gc on gc.id = a.category_id
+                where a.transaction_id = $id
+                """,
+                {"id": overridden_id},
+            ).fetchone()
+        assert row == ("human", "non-essentials/dining")
+
+    def test_gap_transaction_now_appears(self, human_warehouse):
+        warehouse, _overridden_id, gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                """
+                select categorization_source, gc.path
+                from main_silver.silver_transaction_categories_all a
+                join main_gold.gold_category_paths gc on gc.id = a.category_id
+                where a.transaction_id = $id
+                """,
+                {"id": gap_id},
+            ).fetchone()
+        assert row == ("human", "non-essentials/entertainment/streaming")
+
+    def test_no_transaction_is_double_counted(self, human_warehouse):
+        warehouse, _, _ = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            combined, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_all"
+            ).fetchone()
+        assert combined == distinct
+
+    def test_rule_stage_itself_is_unaffected(self, human_warehouse):
+        """The human override only changes the combined view — silver_transaction_categories
+        (stage 1) still reports its own original assignment."""
+        warehouse, overridden_id, _gap_id = human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (source,) = conn.execute(
+                "select categorization_source from main_silver.silver_transaction_categories "
+                "where transaction_id = $id",
+                {"id": overridden_id},
+            ).fetchone()
+        assert source == "rule"

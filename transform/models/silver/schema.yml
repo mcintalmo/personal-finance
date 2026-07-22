@@ -193,12 +193,43 @@ models:
       - name: categorization_confidence
         data_tests: [not_null]
 
+  - name: silver_transaction_categories_human
+    description: >-
+      The human-review stage of the categorization cascade — corrections
+      recorded via `pf review label`. The highest-priority stage: it can
+      override an earlier stage's assignment, not just fill a gap. A
+      transaction corrected more than once keeps only its latest label.
+    columns:
+      - name: transaction_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
   - name: silver_transaction_categories_all
     description: >-
       Every transaction categorized so far, across every cascade stage
-      (currently rules + embedding similarity + local-LLM fallback) — the
-      union PLAN.md's Phase 4 demo checks. Absent = not yet categorized by any
-      stage.
+      (human corrections, then rules + embedding similarity + local-LLM
+      fallback) — the union PLAN.md's Phase 4 demo checks. Absent = not yet
+      categorized by any stage.
     columns:
       - name: transaction_id
         description: One row per categorized transaction, across all stages.

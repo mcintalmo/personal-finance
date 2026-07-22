@@ -14,9 +14,7 @@
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Human review queue for low-confidence assignments; corrections stored as labels and fed
-      back to the classifier
-- [ ] Category rollups through the hierarchy at every level (gold mart over
+- [ ] ⏳ IN PROGRESS — Category rollups through the hierarchy at every level (gold mart over
       silver_transaction_categories + gold_category_paths)
 
 ## Backlog (later phases)
@@ -38,6 +36,33 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Human review queue: the final stage of the categorization cascade, and the highest
+      priority — unlike stages 1-3 (additive: each only covers what prior stages missed
+      entirely), a human correction can **override** an earlier stage's wrong assignment, not
+      just fill a gap. `pf review list [--limit N]` surfaces transactions no automated stage
+      could confidently place (most recent first); `pf review label TRANSACTION_ID
+      CATEGORY_PATH [--note TEXT]` records a correction as a `Label` (the existing
+      `subject_kind=transaction` entity, previously defined but unused) — new
+      `personal_finance.review` module (`fetch_review_queue`, `record_label`), reusing
+      `llm_categorize.fetch_category_paths` to validate/resolve the category path rather than
+      duplicating the recursive taxonomy query. A new dbt model,
+      `silver_transaction_categories_human`, keeps only the latest label per transaction (a
+      transaction can be corrected more than once) with a flat 1.0 confidence.
+      `silver_transaction_categories_all` now unions the human stage **first**, with every
+      automated stage's branch excluding what it covers — the one structural change other stages
+      needed; stages 1-3's own models are untouched, still reporting their original (possibly
+      since-overridden) assignment on their own. Requires `pf transform` → `pf review label` →
+      `pf transform` again — `src/personal_finance/review.py`,
+      `transform/models/silver/silver_transaction_categories_human.sql` (2026-07-22).
+      **Live-verified end-to-end** on the real demo pipeline: reviewed the tail `pf classify`
+      left (Venmo cash-outs, emoji-containing notes, ambiguous card-payment/autopay pairs),
+      labeled one gap-filling correction (a THAI GINGER charge → `non-essentials/dining`) and one
+      override of an existing rule match (a KROGER transaction, originally `essentials/groceries`
+      by rule, relabeled `non-essentials/groceries`) — confirmed the combined view shows `human`
+      for both while `silver_transaction_categories` (stage 1) still reports its own original,
+      unmodified `rule` assignment underneath. **Phase 4 categorization cascade complete**: rules
+      → embedding similarity → local-LLM fallback → human review, each with its own dbt model
+      plus a combined view, all live-verified against real local services.
 - [x] Local-LLM fallback: stage 3 of the categorization cascade. `pf classify` asks a local
       Ollama chat model (new `settings.ollama.chat_model`, default `phi3:mini` — already pulled
       on this dev machine) to pick a category for every merchant stages 1-2 (rules, embedding

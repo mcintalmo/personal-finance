@@ -24,6 +24,11 @@ sources:
           a local Ollama chat call
           (personal_finance.llm_categorize.compute_missing_llm_categories,
           `pf classify`) and reused across runs.
+      - name: labels
+        description: >-
+          Human categorization corrections (personal_finance.review.record_label,
+          `pf review label`) — training data for future classifier
+          improvements, and the highest-priority categorization stage.
 
   # Bronze = raw source exports landed as Parquet by dlt (Phase 2). Read as a
   # single config-free glob over every source directory: a new bank/source

@@ -13,6 +13,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf deposit     atomically place a completed file into a watched folder
     pf enrich      embed merchants for the embedding-similarity categorization stage
     pf classify    ask a local LLM to categorize merchants stages 1-2 missed
+    pf review      list the categorization cascade's ambiguous tail and record corrections
 """
 
 import os
@@ -25,7 +26,7 @@ import typer
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
 from personal_finance.embed import EmbeddingClient, compute_missing_embeddings
-from personal_finance.exceptions import ConfigurationError, ExternalServiceError
+from personal_finance.exceptions import ConfigurationError, ExternalServiceError, NotFoundError
 from personal_finance.ingest import (
     IngestOutcome,
     IngestStatus,
@@ -33,7 +34,12 @@ from personal_finance.ingest import (
     ingest_file,
     watch_folder,
 )
-from personal_finance.llm_categorize import LlmCategorizeClient, compute_missing_llm_categories
+from personal_finance.llm_categorize import (
+    LlmCategorizeClient,
+    compute_missing_llm_categories,
+    fetch_category_paths,
+)
+from personal_finance.review import fetch_review_queue, record_label
 from personal_finance.seed import seed_categories, seed_rules
 
 if TYPE_CHECKING:
@@ -52,6 +58,14 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+review_app = typer.Typer(
+    name="review",
+    help="List the categorization cascade's ambiguous tail and record human corrections.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(review_app)
 
 
 @app.command()
@@ -370,3 +384,74 @@ def classify(
                 raise typer.Exit(code=1) from exc
 
     typer.echo(f"Classified {count} new merchant(s). Run `pf transform` to apply them.")
+
+
+def _require_transform_built(conn: duckdb.DuckDBPyConnection) -> None:
+    result = conn.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = 'main_silver' AND table_name = 'silver_transaction_categories_all'"
+    ).fetchone()
+    if not result or not result[0]:
+        typer.echo(
+            "silver_transaction_categories_all has not been built yet — run `pf transform` first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@review_app.command("list")
+def review_list(
+    limit: int = typer.Option(20, help="Max transactions to show."),
+) -> None:
+    """List transactions no cascade stage could confidently categorize.
+
+    Requires `pf transform` to have run at least once.
+    """
+    warehouse = get_settings().data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_transform_built(conn)
+        items = fetch_review_queue(conn, limit=limit)
+
+    if not items:
+        typer.echo("Nothing to review — every transaction is categorized.")
+        return
+    for item in items:
+        label = item.merchant_name or item.description_raw
+        typer.echo(
+            f"{item.transaction_id}  {item.posted_on}  {item.amount:>10}  {label} ({item.source})"
+        )
+    typer.echo(f"{len(items)} transaction(s) awaiting review.")
+
+
+@review_app.command("label")
+def review_label(
+    transaction_id: str = typer.Argument(..., help="transaction_id from `pf review list`."),
+    category_path: str = typer.Argument(
+        ..., help="Slash-separated category path, e.g. essentials/groceries."
+    ),
+    note: str | None = typer.Option(None, help="Optional free-text context for this correction."),
+) -> None:
+    """Record a human category correction for one transaction.
+
+    Stored as a label; the categorization outranks every automated stage once
+    `pf transform` re-runs.
+    """
+    warehouse = get_settings().data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_transform_built(conn)
+        category_paths = fetch_category_paths(conn)
+        try:
+            record_label(conn, transaction_id, category_path, category_paths, note=note)
+        except NotFoundError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Labeled {transaction_id} -> {category_path}. Run `pf transform` to apply it.")
