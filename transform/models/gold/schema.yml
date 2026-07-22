@@ -10,3 +10,49 @@ models:
         data_tests: [unique, not_null]
       - name: depth
         data_tests: [not_null]
+
+  - name: gold_category_ancestors
+    description: >-
+      Closure table: every category paired with itself and each ancestor up
+      to the taxonomy root. One row per (category_id, ancestor_id) pair.
+    columns:
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: ancestor_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+
+  - name: gold_category_rollups
+    description: >-
+      One row per taxonomy category (every level), aggregating every
+      categorized, non-transfer transaction assigned to that category or any
+      descendant. Every category has a row, zeroed out if nothing rolled up
+      to it.
+    columns:
+      - name: category_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: path
+        data_tests: [unique, not_null]
+      - name: transaction_count
+        data_tests: [not_null]
+      - name: total_outflow
+        data_tests: [not_null]
+      - name: total_inflow
+        data_tests: [not_null]
+      - name: net_amount
+        data_tests: [not_null]

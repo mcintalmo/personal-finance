@@ -7,6 +7,7 @@ CI fails.
 """
 
 import warnings
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -393,6 +394,144 @@ class TestDbtBuild:
             rows = conn.execute("select path, depth from main_gold.gold_category_paths").fetchall()
         for path, depth in rows:
             assert depth == path.count("/")
+
+
+class TestGoldCategoryAncestors:
+    def test_every_category_is_its_own_ancestor(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (missing_self,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_categories c
+                where not exists (
+                    select 1 from main_gold.gold_category_ancestors a
+                    where a.category_id = c.id and a.ancestor_id = c.id
+                )
+                """
+            ).fetchone()
+        assert missing_self == 0
+
+    def test_leaf_ancestors_match_its_path(self, built_warehouse):
+        """essentials/groceries's ancestor set (by path) must be exactly
+        {essentials, essentials/groceries}."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            paths = {
+                path
+                for (path,) in conn.execute(
+                    """
+                    select gc.path
+                    from main_gold.gold_category_ancestors a
+                    join main_silver.silver_categories leaf on leaf.id = a.category_id
+                    join main_gold.gold_category_paths gc on gc.id = a.ancestor_id
+                    join main_gold.gold_category_paths leaf_path on leaf_path.id = leaf.id
+                    where leaf_path.path = 'essentials/groceries'
+                    """
+                ).fetchall()
+            }
+        assert paths == {"essentials", "essentials/groceries"}
+
+    def test_root_has_only_itself_as_ancestor(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (count,) = conn.execute(
+                """
+                select count(*)
+                from main_gold.gold_category_ancestors a
+                join main_gold.gold_category_paths gc on gc.id = a.category_id
+                where gc.path = 'essentials'
+                """
+            ).fetchone()
+        assert count == 1
+
+
+class TestGoldCategoryRollups:
+    def _row(self, warehouse: Path, path: str) -> tuple:
+        with duckdb.connect(str(warehouse)) as conn:
+            return conn.execute(
+                "select transaction_count, total_outflow, total_inflow, net_amount "
+                "from main_gold.gold_category_rollups where path = $path",
+                {"path": path},
+            ).fetchone()
+
+    def test_every_taxonomy_category_has_a_row(self, built_warehouse):
+        warehouse, _, config, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (count,) = conn.execute(
+                "select count(*) from main_gold.gold_category_rollups"
+            ).fetchone()
+        assert count == len(config.category_paths())
+
+    def test_zero_activity_category_is_present_and_zeroed(self, built_warehouse):
+        """No rule ever assigns to essentials/groceries/apples -- it must
+        still appear, zeroed out, not be absent."""
+        warehouse, _, _, _ = built_warehouse
+        row = self._row(warehouse, "essentials/groceries/apples")
+        assert row == (0, Decimal("0.00"), Decimal("0.00"), Decimal("0.00"))
+
+    def test_leaf_rollup_matches_directly_assigned_transactions(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            expected = conn.execute(
+                """
+                select count(*), -sum(t.amount)
+                from main_silver.silver_transaction_categories sc
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = sc.category_id
+                where gc.path = 'essentials/groceries' and not t.is_transfer
+                """
+            ).fetchone()
+        row = self._row(warehouse, "essentials/groceries")
+        assert row[0] == expected[0]
+        assert row[1] == expected[1]
+
+    def test_parent_rollup_equals_sum_of_children(self, built_warehouse):
+        """essentials' totals must equal the sum of its direct children's
+        totals (groceries + commute + housing), proving the hierarchy walk."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            children_total = conn.execute(
+                """
+                select sum(r.transaction_count), sum(r.total_outflow), sum(r.total_inflow)
+                from main_gold.gold_category_rollups r
+                join main_silver.silver_categories c on c.id = r.category_id
+                join main_silver.silver_categories parent on parent.id = c.parent_id
+                join main_gold.gold_category_paths parent_path on parent_path.id = parent.id
+                where parent_path.path = 'essentials'
+                """
+            ).fetchone()
+        parent_row = self._row(warehouse, "essentials")
+        assert parent_row[0] == children_total[0]
+        assert parent_row[1] == children_total[1]
+        assert parent_row[2] == children_total[2]
+
+    def test_transfers_are_excluded(self, built_warehouse):
+        """Total rolled-up transaction_count across every root can't exceed
+        categorized, non-transfer transactions -- transfers never count."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (categorized_non_transfer,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_all a
+                join main_silver.silver_transactions t using (transaction_id)
+                where not t.is_transfer
+                """
+            ).fetchone()
+            (root_total,) = conn.execute(
+                "select sum(transaction_count) from main_gold.gold_category_rollups where depth = 0"
+            ).fetchone()
+        assert root_total == categorized_non_transfer
+
+    def test_net_amount_is_inflow_minus_outflow(self, built_warehouse):
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select total_inflow, total_outflow, net_amount from main_gold.gold_category_rollups"
+            ).fetchall()
+        for inflow, outflow, net in rows:
+            assert net == inflow - outflow
 
 
 class TestSilverTransactions:
