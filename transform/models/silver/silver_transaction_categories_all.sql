@@ -13,3 +13,8 @@ union all
 
 select transaction_id, category_id, categorization_source, categorization_confidence
 from {{ ref('silver_transaction_categories_embedding') }}
+
+union all
+
+select transaction_id, category_id, categorization_source, categorization_confidence
+from {{ ref('silver_transaction_categories_llm') }}

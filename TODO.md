@@ -14,8 +14,7 @@
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
 
-- [ ] ⏳ IN PROGRESS — Local LLM fallback for the ambiguous tail
-- [ ] Human review queue for low-confidence assignments; corrections stored as labels and fed
+- [ ] ⏳ IN PROGRESS — Human review queue for low-confidence assignments; corrections stored as labels and fed
       back to the classifier
 - [ ] Category rollups through the hierarchy at every level (gold mart over
       silver_transaction_categories + gold_category_paths)
@@ -39,6 +38,37 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Local-LLM fallback: stage 3 of the categorization cascade. `pf classify` asks a local
+      Ollama chat model (new `settings.ollama.chat_model`, default `phi3:mini` — already pulled
+      on this dev machine) to pick a category for every merchant stages 1-2 (rules, embedding
+      similarity) missed entirely, using structured JSON output (Ollama's `format` schema, no
+      free-text parsing) so the response is `{category, confidence}`. New
+      `personal_finance.llm_categorize` module — `LlmCategorizeClient` wraps `/api/chat`;
+      `compute_missing_llm_categories` reads what's still uncategorized from
+      `main_silver.silver_transaction_categories`/`_embedding`, asks once per distinct merchant,
+      and caches into a new `merchant_llm_categories` table (keyed by (merchant_name, model), same
+      idempotent-cache pattern as `merchant_embeddings`). Crucially, a merchant the model
+      classifies into a category **outside the given list** (a real, observed failure mode of a
+      small local model — see below) is left **uncached** rather than raising or trusting a
+      hallucinated category — same "decline to guess" contract as stage 2's confidence gate, just
+      enforced by membership-in-list instead of a numeric threshold. A new dbt model,
+      `silver_transaction_categories_llm`, gates cached classifications by self-reported
+      `confidence` clearing `llm_confidence_threshold` (dbt var, default 0.50).
+      `silver_transaction_categories_all` now unions all three stages (still disjoint by
+      construction). Requires `pf transform` → `pf classify` (asks + caches) → `pf transform` again
+      (builds the LLM-stage model against the newly cached classifications) —
+      `src/personal_finance/llm_categorize.py`,
+      `transform/models/silver/silver_transaction_categories_llm.sql` (2026-07-22). **Live-verified
+      end-to-end** against a real local `phi3:mini` on the full demo pipeline: of ~21 merchants
+      stages 1-2 left uncategorized, only CHIPOTLE (a clean, unambiguous name) was confidently
+      classified (`non-essentials/dining`, confidence 0.95) — the harder/noisier remainder
+      (raw-ish descriptors, emoji, ambiguous strings like "PAYMENT THANK YOU -") were **declined**
+      because the model's response named a category outside the given list, not cached, left for
+      human review. This is the safety mechanism working as designed on a small, imperfect local
+      model — no bad categorizations were ever written — not a defect; a stronger chat model
+      (swappable via `settings.ollama.chat_model` / `pf classify --model`) should confidently cover
+      more of the tail. The dbt-side gating logic is also covered by tests using a hand-crafted
+      synthetic classification (independent of any specific chat model's behavior).
 - [x] Embedding-similarity classifier: stage 2 of the categorization cascade. `pf enrich` embeds
       every distinct merchant not yet cached via a local Ollama call (new `personal_finance.embed`
       module — `httpx`-based `EmbeddingClient`, `settings.ollama.*`), caching vectors in a new

@@ -91,6 +91,21 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "merchant_llm_categories",
+        """
+        CREATE TABLE IF NOT EXISTS merchant_llm_categories (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            merchant_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            confidence DOUBLE NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+            note TEXT,
+            UNIQUE (merchant_name, model)
+        )
+        """,
+    ),
+    (
         "transactions",
         """
         CREATE TABLE IF NOT EXISTS transactions (

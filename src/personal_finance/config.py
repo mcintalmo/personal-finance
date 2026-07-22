@@ -53,6 +53,7 @@ class OllamaSettings(BaseModel):
 
     base_url: str = "http://localhost:11434"
     embedding_model: str = "nomic-embed-text"
+    chat_model: str = "phi3:mini"
 
 
 class Settings(BaseSettings):

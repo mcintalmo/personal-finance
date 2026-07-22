@@ -18,6 +18,12 @@ sources:
           Cached embedding vector per distinct merchant_name, computed via a
           local Ollama call (personal_finance.embed.compute_missing_embeddings,
           `pf enrich`) and reused across runs.
+      - name: merchant_llm_categories
+        description: >-
+          Cached LLM category choice per distinct merchant_name, computed via
+          a local Ollama chat call
+          (personal_finance.llm_categorize.compute_missing_llm_categories,
+          `pf classify`) and reused across runs.
 
   # Bronze = raw source exports landed as Parquet by dlt (Phase 2). Read as a
   # single config-free glob over every source directory: a new bank/source

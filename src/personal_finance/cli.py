@@ -12,6 +12,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf watch       watch a folder and ingest exports as they are dropped in
     pf deposit     atomically place a completed file into a watched folder
     pf enrich      embed merchants for the embedding-similarity categorization stage
+    pf classify    ask a local LLM to categorize merchants stages 1-2 missed
 """
 
 import os
@@ -32,6 +33,7 @@ from personal_finance.ingest import (
     ingest_file,
     watch_folder,
 )
+from personal_finance.llm_categorize import LlmCategorizeClient, compute_missing_llm_categories
 from personal_finance.seed import seed_categories, seed_rules
 
 if TYPE_CHECKING:
@@ -318,3 +320,53 @@ def enrich(
                 raise typer.Exit(code=1) from exc
 
     typer.echo(f"Embedded {count} new merchant(s). Run `pf transform` to apply them.")
+
+
+@app.command()
+def classify(
+    base_url: str | None = typer.Option(
+        None, help="Ollama server URL (default: Settings.ollama.base_url)."
+    ),
+    model: str | None = typer.Option(
+        None, help="Chat model (default: Settings.ollama.chat_model)."
+    ),
+) -> None:
+    """Ask a local LLM to categorize merchants stages 1-2 (rules, embedding
+    similarity) missed — stage 3 of the categorization cascade.
+
+    Requires `pf transform` to have run at least once (reads
+    silver_transaction_categories/_embedding to see what's still
+    uncategorized) and a local Ollama server with the chat model pulled.
+    Re-run `pf transform` afterward to build silver_transaction_categories_llm
+    against the newly cached classifications.
+    """
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        result = conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
+        ).fetchone()
+        if not result or not result[0]:
+            typer.echo(
+                "silver_transactions has not been built yet — run `pf transform` first.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        with LlmCategorizeClient(
+            base_url or settings.ollama.base_url, model or settings.ollama.chat_model
+        ) as client:
+            try:
+                count = compute_missing_llm_categories(
+                    conn, client, model or settings.ollama.chat_model
+                )
+            except ExternalServiceError as exc:
+                typer.echo(f"Classification failed: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Classified {count} new merchant(s). Run `pf transform` to apply them.")

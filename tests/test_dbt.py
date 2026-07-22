@@ -15,9 +15,10 @@ import pytest
 from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id
 from personal_finance.ingest import run_ingestion
+from personal_finance.llm_categorize import merchant_llm_category_id
 from personal_finance.seed import seed_categories, seed_rules
 from personal_finance.synth import generate_scenario, write_scenario
-from personal_finance.user_config import load_user_config
+from personal_finance.user_config import category_id_for_path, load_user_config
 
 REPO_ROOT = Path(__file__).parent.parent
 EXAMPLES_CONFIG_DIR = REPO_ROOT / "config" / "examples"
@@ -137,6 +138,68 @@ def embedding_warehouse(built_warehouse):
                     "--vars",
                     f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
                     f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+# CHIPOTLE is the embedding stage's deliberately-unmatched merchant (see
+# _SYNTHETIC_EMBEDDINGS above) — the LLM stage picks it up from there. A
+# self-reported confidence rather than a real Ollama call, since the dbt-side
+# gating logic is what's under test here, not any specific chat model.
+_TEST_LLM_MODEL = "test-chat-model"
+_TEST_LLM_CONFIDENCE_THRESHOLD = 0.50
+_SYNTHETIC_LLM_CATEGORIES = {
+    "CHIPOTLE": ("non-essentials/dining", 0.9),
+}
+
+
+@pytest.fixture(scope="module")
+def llm_warehouse(embedding_warehouse, built_warehouse):
+    """``embedding_warehouse`` plus a synthetic ``merchant_llm_categories`` row,
+    with dbt re-run (overriding the LLM vars) so the LLM-stage model picks it
+    up.
+    """
+    warehouse = embedding_warehouse
+    _, bronze, _config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        for name, (path, confidence) in _SYNTHETIC_LLM_CATEGORIES.items():
+            conn.execute(
+                "INSERT INTO merchant_llm_categories "
+                "(id, created_at, merchant_name, model, category_id, confidence) "
+                "VALUES ($id, now(), $merchant_name, $model, $category_id, $confidence)",
+                {
+                    "id": merchant_llm_category_id(name, _TEST_LLM_MODEL),
+                    "merchant_name": name,
+                    "model": _TEST_LLM_MODEL,
+                    "category_id": category_id_for_path(path),
+                    "confidence": confidence,
+                },
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}, '
+                    f'"llm_model": "{_TEST_LLM_MODEL}", '
+                    f'"llm_confidence_threshold": {_TEST_LLM_CONFIDENCE_THRESHOLD}}}',
                 ]
             )
     finally:
@@ -526,25 +589,70 @@ class TestSilverTransactionCategoriesEmbedding:
         assert overlap == 0
 
 
+class TestSilverTransactionCategoriesLlm:
+    def test_chipotle_is_classified(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select l.categorization_confidence, gc.path
+                from main_silver.silver_transaction_categories_llm l
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = l.category_id
+                where t.merchant_name = 'CHIPOTLE'
+                """
+            ).fetchall()
+        assert rows, "CHIPOTLE should have been classified via the LLM stage"
+        for confidence, path in rows:
+            assert path == "non-essentials/dining"
+            assert confidence == pytest.approx(0.9)
+
+    def test_grain_has_no_duplicates(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            total, distinct = conn.execute(
+                "select count(*), count(distinct transaction_id) "
+                "from main_silver.silver_transaction_categories_llm"
+            ).fetchone()
+        assert total == distinct
+
+    def test_never_recategorizes_a_stage1_or_stage2_transaction(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            (overlap,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_llm l
+                where l.transaction_id in (
+                    select transaction_id from main_silver.silver_transaction_categories
+                    union
+                    select transaction_id from main_silver.silver_transaction_categories_embedding
+                )
+                """
+            ).fetchone()
+        assert overlap == 0
+
+
 class TestSilverTransactionCategoriesAll:
-    def test_unions_both_stages_without_duplicates(self, embedding_warehouse):
-        with duckdb.connect(str(embedding_warehouse)) as conn:
+    def test_unions_all_three_stages_without_duplicates(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
             stage1 = conn.execute(
                 "select count(*) from main_silver.silver_transaction_categories"
             ).fetchone()[0]
             stage2 = conn.execute(
                 "select count(*) from main_silver.silver_transaction_categories_embedding"
             ).fetchone()[0]
+            stage3 = conn.execute(
+                "select count(*) from main_silver.silver_transaction_categories_llm"
+            ).fetchone()[0]
             combined, distinct = conn.execute(
                 "select count(*), count(distinct transaction_id) "
                 "from main_silver.silver_transaction_categories_all"
             ).fetchone()
-        assert stage2 > 0  # sanity: the synthetic match actually landed
-        assert combined == stage1 + stage2
-        assert distinct == combined  # no transaction counted by both stages
+        assert stage2 > 0  # sanity: the synthetic matches actually landed
+        assert stage3 > 0
+        assert combined == stage1 + stage2 + stage3
+        assert distinct == combined  # no transaction counted by more than one stage
 
-    def test_starbucks_appears_via_the_combined_view(self, embedding_warehouse):
-        with duckdb.connect(str(embedding_warehouse)) as conn:
+    def test_starbucks_appears_via_the_combined_view(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
             row = conn.execute(
                 """
                 select a.categorization_source, a.categorization_confidence
@@ -556,3 +664,16 @@ class TestSilverTransactionCategoriesAll:
             ).fetchone()
         assert row == ("embedding", row[1])
         assert row[1] > 0.99
+
+    def test_chipotle_appears_via_the_combined_view(self, llm_warehouse):
+        with duckdb.connect(str(llm_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select a.categorization_source, a.categorization_confidence
+                from main_silver.silver_transaction_categories_all a
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = 'CHIPOTLE'
+                limit 1
+                """
+            ).fetchone()
+        assert row == ("llm", 0.9)

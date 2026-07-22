@@ -209,3 +209,19 @@ class MerchantEmbedding(Entity):
     merchant_name: str
     model: str
     embedding: list[float]
+
+
+class MerchantLlmCategory(Entity):
+    """A cached LLM category choice for a distinct ``merchant_name``.
+
+    Stage 3 of the categorization cascade (:mod:`personal_finance.llm_categorize`)
+    — the local-LLM fallback for merchants neither rules nor embedding
+    similarity could place. Cached per (merchant_name, model), like
+    :class:`MerchantEmbedding`, so re-running never re-asks the LLM about a
+    merchant it already classified.
+    """
+
+    merchant_name: str
+    model: str
+    category_id: str
+    confidence: float
