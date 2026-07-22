@@ -28,7 +28,7 @@ already_categorized as (
 classifications as (
     select merchant_name, category_id, confidence
     from {{ source('app', 'merchant_llm_categories') }}
-    where model = '{{ var("llm_model", "qwen2.5:3b") }}'
+    where model = '{{ var("llm_model", "phi3:mini") }}'
     and confidence >= {{ var('llm_confidence_threshold', 0.50) }}
 )
 

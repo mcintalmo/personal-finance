@@ -165,7 +165,9 @@ class RuleConfig(_ConfigModel):
     see transform/models/silver/silver_transaction_categories.sql.
     """
 
-    pattern: str = Field(min_length=1)  # regular expression, matched case-insensitively via (?i)
+    # Regular expression, matched case-sensitively by default — prepend (?i)
+    # (as every pattern in config/examples/rules.yaml does) for case-insensitive matching.
+    pattern: str = Field(min_length=1)
     category: str  # slash-separated taxonomy path
     # merchant_name (normalize_merchant's cleaned key) is the recommended target —
     # less noisy than the raw descriptor, so patterns need fewer variants.

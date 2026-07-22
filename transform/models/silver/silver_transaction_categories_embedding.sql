@@ -1,8 +1,17 @@
 -- Stage 2 of the categorization cascade: embedding-similarity vs. labeled
--- history. Picks up merchants stage 1 (rules) didn't match, embeds them
--- (cached by `pf enrich` — see personal_finance.embed), and assigns each the
--- category of its nearest already-categorized merchant by cosine similarity,
--- when that similarity clears `embedding_confidence_threshold`.
+-- history. Picks up transactions stage 1 (rules) didn't match, embeds their
+-- merchants (cached by `pf enrich` — see personal_finance.embed), and assigns
+-- each the category of its nearest already-categorized merchant by cosine
+-- similarity, when that similarity clears `embedding_confidence_threshold`.
+--
+-- Candidacy is transaction-level, not merchant-level: a rule can target
+-- account_name/source/description_raw rather than merchant_name, so a
+-- merchant can have *some* rule-matched transactions and others left
+-- uncategorized by stage 1. Those leftovers still get a chance here (often a
+-- trivial, high-confidence self-match against the same merchant's own
+-- rule-assigned category, since a categorized merchant can also appear in
+-- its own reference set) — excluding the whole merchant, as an earlier
+-- version of this model did, silently stranded them for stages 3/4 instead.
 --
 -- Grain: at most one row per transaction_id, same contract as stage 1 — a
 -- transaction absent here (and from stage 1) is still uncategorized, ready
@@ -49,18 +58,20 @@ reference as (
     ) = 1
 ),
 
--- Candidates: merchants with no categorized transaction at all, with an
--- embedding available to compare.
-categorized_merchants as (
+-- Candidates: merchants used by at least one transaction stage 1 didn't
+-- cover, with an embedding available to compare. Deliberately not "merchants
+-- with zero categorized transactions" — a merchant can be partly covered
+-- (see header) and its remaining transactions still need a chance here.
+uncategorized_merchants as (
     select distinct t.merchant_name
     from tx as t
-    inner join stage1 as s1 using (transaction_id)
+    where t.transaction_id not in (select transaction_id from stage1)
 ),
 
 candidates as (
     select e.merchant_name, e.embedding
     from embeddings as e
-    where e.merchant_name not in (select merchant_name from categorized_merchants)
+    where e.merchant_name in (select merchant_name from uncategorized_merchants)
 ),
 
 -- Nearest reference merchant per candidate, by cosine similarity.
@@ -92,3 +103,4 @@ select
     b.similarity as categorization_confidence
 from tx as t
 inner join best as b using (merchant_name)
+where t.transaction_id not in (select transaction_id from stage1)

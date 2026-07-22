@@ -135,8 +135,10 @@ models:
     description: >-
       Stage 2 (embedding similarity) of the categorization cascade — one row
       per transaction whose merchant matched a rule-categorized merchant by
-      cosine similarity above the confidence threshold. Only covers merchants
-      stage 1 missed entirely.
+      cosine similarity above the confidence threshold. Candidacy is
+      transaction-level: only covers transactions stage 1 missed, even if
+      other transactions of the same merchant were rule-matched (e.g. via an
+      account_name/source rule rather than merchant_name).
     columns:
       - name: transaction_id
         data_tests:

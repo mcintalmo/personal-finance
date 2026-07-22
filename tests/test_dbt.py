@@ -18,7 +18,12 @@ from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id
 from personal_finance.seed import seed_categories, seed_rules
 from personal_finance.synth import generate_scenario, write_scenario
-from personal_finance.user_config import category_id_for_path, load_user_config
+from personal_finance.user_config import (
+    RuleApplyField,
+    RuleConfig,
+    category_id_for_path,
+    load_user_config,
+)
 
 REPO_ROOT = Path(__file__).parent.parent
 EXAMPLES_CONFIG_DIR = REPO_ROOT / "config" / "examples"
@@ -119,6 +124,93 @@ def embedding_warehouse(built_warehouse):
                     "embedding": vector,
                 },
             )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
+                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+_PARTIAL_MATCH_MERCHANT = "WIDGET SHOP"
+
+
+@pytest.fixture(scope="module")
+def partial_merchant_match_warehouse(tmp_path_factory):
+    """A small, self-contained warehouse: one merchant transacting on two
+    different accounts (Chase Checking, Capital One Card), plus one extra
+    rule targeting account_name rather than merchant_name — so only the
+    Capital-One-side transaction is rule-matched, leaving its Chase-side
+    sibling (same merchant_name) uncategorized by stage 1.
+
+    Regression fixture for a real bug: an earlier version of
+    silver_transaction_categories_embedding excluded a merchant from stage-2
+    candidacy entirely if *any* of its transactions were rule-matched, so the
+    Chase-side transaction would have been silently stranded. The fix makes
+    candidacy transaction-level. Built independently of ``built_warehouse``
+    (rather than reusing its 3-source synth scenario) since no merchant there
+    naturally spans two accounts.
+    """
+    root = tmp_path_factory.mktemp("wh_partial_match")
+    warehouse = root / "warehouse.duckdb"
+    bronze = root / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    sources = {s.name: s for s in config.sources}
+
+    exports = root / "exports"
+    exports.mkdir()
+    chase_csv = exports / "chase_checking.csv"
+    chase_csv.write_text(
+        f"Posting Date,Amount,Description\n01/15/2026,-25.00,{_PARTIAL_MATCH_MERCHANT}\n"
+    )
+    capital_one_csv = exports / "capital_one.csv"
+    capital_one_csv.write_text(
+        f"Posted Date,Debit,Credit,Description\n2026-01-16,30.00,0.00,{_PARTIAL_MATCH_MERCHANT}\n"
+    )
+    run_ingestion(sources["chase_checking"], chase_csv, bronze)
+    run_ingestion(sources["capital_one"], capital_one_csv, bronze)
+
+    rules = [
+        *config.rules,
+        RuleConfig(
+            pattern=r"(?i)^Capital One Card$",
+            applies_to=RuleApplyField.ACCOUNT_NAME,
+            category="non-essentials/dining",
+        ),
+    ]
+    with duckdb.connect(str(warehouse)) as conn:
+        create_schema(conn)
+        seed_categories(conn, config.taxonomy)
+        seed_rules(conn, rules)
+        conn.execute(
+            "INSERT INTO merchant_embeddings (id, created_at, merchant_name, model, embedding) "
+            "VALUES ($id, now(), $merchant_name, $model, $embedding)",
+            {
+                "id": merchant_embedding_id(_PARTIAL_MATCH_MERCHANT, _TEST_EMBEDDING_MODEL),
+                "merchant_name": _PARTIAL_MATCH_MERCHANT,
+                "model": _TEST_EMBEDDING_MODEL,
+                "embedding": [1.0],
+            },
+        )
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
@@ -652,6 +744,49 @@ class TestSilverTransactionCategoriesEmbedding:
                 """
             ).fetchone()
         assert overlap == 0
+
+
+class TestSilverTransactionCategoriesEmbeddingPartialMerchantMatch:
+    """Regression coverage: a merchant with *some* rule-matched transactions
+    (via an account_name rule) must not be excluded wholesale from stage 2 —
+    its other, still-uncategorized transactions get their own chance."""
+
+    def test_leftover_transaction_is_still_a_candidate(self, partial_merchant_match_warehouse):
+        with duckdb.connect(str(partial_merchant_match_warehouse)) as conn:
+            rows = conn.execute(
+                """
+                select e.categorization_confidence, gc.path
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                join main_gold.gold_category_paths gc on gc.id = e.category_id
+                where t.merchant_name = $merchant and t.account_name <> 'Capital One Card'
+                """,
+                {"merchant": _PARTIAL_MATCH_MERCHANT},
+            ).fetchall()
+        assert rows, (
+            f"{_PARTIAL_MATCH_MERCHANT}'s non-Capital-One transaction should still have "
+            "matched via embedding similarity (a trivial self-match against its own "
+            "Capital-One-rule-assigned category), not been stranded"
+        )
+        for confidence, path in rows:
+            assert path == "non-essentials/dining"
+            assert confidence == pytest.approx(1.0)
+
+    def test_rule_matched_transaction_is_excluded_from_stage2(
+        self, partial_merchant_match_warehouse
+    ):
+        """The Capital One transaction is stage 1's, not stage 2's — no double count."""
+        with duckdb.connect(str(partial_merchant_match_warehouse)) as conn:
+            (count,) = conn.execute(
+                """
+                select count(*)
+                from main_silver.silver_transaction_categories_embedding e
+                join main_silver.silver_transactions t using (transaction_id)
+                where t.merchant_name = $merchant and t.account_name = 'Capital One Card'
+                """,
+                {"merchant": _PARTIAL_MATCH_MERCHANT},
+            ).fetchone()
+        assert count == 0
 
 
 class TestSilverTransactionCategoriesLlm:
