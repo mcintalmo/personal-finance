@@ -1,0 +1,12 @@
+# Known city names normalize_merchant can strip as a trailing locality even
+# with no state code to anchor on — the generic macro only strips "CITY ST"
+# when a two-letter state follows (see normalize_merchant.sql step 8); a bare
+# city name is too ambiguous with real merchant-name words to strip
+# generically, so it's opt-in, per-user config instead.
+#
+# "Bellevue" demonstrates this against this repo's dummy synth data: THAI
+# GINGER BELLEVUE has no state suffix (unlike CHEVRON 0093 BELLEVUE WA,
+# already handled generically), so without this entry merchant_name stays
+# "THAI GINGER BELLEVUE" instead of the cleaner "THAI GINGER".
+
+- Bellevue

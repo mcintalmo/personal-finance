@@ -8,6 +8,7 @@ import pytest
 from personal_finance.exceptions import ConfigurationError
 from personal_finance.models import AccountType, BudgetPeriod
 from personal_finance.user_config import (
+    MerchantAliasConfig,
     RuleConfig,
     SourceConfig,
     SourceKind,
@@ -39,6 +40,8 @@ class TestLoadUserConfig:
         assert {source.name for source in config.sources} >= {"chase_checking", "venmo"}
         assert "essentials/groceries/apples" in config.category_paths()
         assert config.rules and config.budgets
+        assert config.merchant_aliases
+        assert config.known_cities == ["Bellevue"]
 
     def test_missing_directory_yields_empty_config(self, tmp_path):
         config = load_user_config(tmp_path / "does-not-exist")
@@ -50,6 +53,8 @@ class TestLoadUserConfig:
         assert config.category_paths() == {"essentials", "essentials/groceries"}
         assert config.sources == []
         assert config.rules == []
+        assert config.merchant_aliases == []
+        assert config.known_cities == []
 
     def test_empty_file_is_empty_section(self, tmp_path):
         write_config(tmp_path, taxonomy="")
@@ -69,6 +74,19 @@ class TestLoadUserConfig:
         write_config(tmp_path, taxonomy="- name: a\n  colour: red")
         with pytest.raises(ConfigurationError, match="colour"):
             load_user_config(tmp_path)
+
+    def test_known_cities_loads_a_plain_string_list(self, tmp_path):
+        write_config(tmp_path, places="- Bellevue\n- Seattle\n")
+        config = load_user_config(tmp_path)
+        assert config.known_cities == ["Bellevue", "Seattle"]
+
+    def test_merchant_aliases_load(self, tmp_path):
+        write_config(
+            tmp_path,
+            merchants='- pattern: "(?i)^costco"\n  canonical_name: "COSTCO"\n',
+        )
+        config = load_user_config(tmp_path)
+        assert config.merchant_aliases[0].canonical_name == "COSTCO"
 
     def test_default_dir_comes_from_settings(self, monkeypatch, tmp_path):
         from personal_finance import user_config as module
@@ -137,6 +155,14 @@ class TestModelValidation:
     def test_invalid_regex_rejected(self):
         with pytest.raises(ValueError, match="invalid regular expression"):
             RuleConfig(pattern="([unclosed", category="a")
+
+    def test_merchant_alias_invalid_regex_rejected(self):
+        with pytest.raises(ValueError, match="invalid regular expression"):
+            MerchantAliasConfig(pattern="([unclosed", canonical_name="a")
+
+    def test_merchant_alias_valid(self):
+        alias = MerchantAliasConfig(pattern="(?i)^costco", canonical_name="COSTCO")
+        assert alias.canonical_name == "COSTCO"
 
     def test_category_name_with_separator_rejected(self):
         with pytest.raises(ValueError, match="must not contain"):

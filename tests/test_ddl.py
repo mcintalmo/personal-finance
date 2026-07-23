@@ -21,6 +21,7 @@ from personal_finance.models import (
     Link,
     LinkType,
     Merchant,
+    MerchantAlias,
     MerchantEmbedding,
     MerchantLlmCategory,
     Rule,
@@ -33,6 +34,7 @@ EXPECTED_TABLES = {
     "merchants",
     "categories",
     "rules",
+    "merchant_aliases",
     "merchant_embeddings",
     "merchant_llm_categories",
     "transactions",
@@ -92,6 +94,7 @@ class TestRoundTrip:
             category_id=groceries.id,
             priority=0,
         )
+        merchant_alias = MerchantAlias(pattern="(?i)^costco", canonical_name="COSTCO", priority=0)
         merchant_embedding = MerchantEmbedding(
             merchant_name="TRADER JOE'S", model="nomic-embed-text", embedding=[0.1, 0.2, 0.3]
         )
@@ -141,6 +144,7 @@ class TestRoundTrip:
         insert(conn, "categories", root)
         insert(conn, "categories", groceries)
         insert(conn, "rules", rule)
+        insert(conn, "merchant_aliases", merchant_alias)
         insert(conn, "merchant_embeddings", merchant_embedding)
         insert(conn, "merchant_llm_categories", merchant_llm_category)
         insert(conn, "transactions", txn)

@@ -198,6 +198,20 @@ class Rule(Entity):
     priority: int
 
 
+class MerchantAlias(Entity):
+    """A deterministic pattern → canonical merchant name, seeded from ``merchants.yaml``.
+
+    Resolves brand variants and other aliases the generic ``normalize_merchant``
+    macro can't (see transform/models/silver/silver_transactions.sql).
+    ``priority`` is the rule's position in the config file (first match wins);
+    seeding fully replaces this table each time, so it has no note to preserve.
+    """
+
+    pattern: str
+    canonical_name: str
+    priority: int
+
+
 class MerchantEmbedding(Entity):
     """A cached embedding vector for a distinct ``merchant_name``.
 

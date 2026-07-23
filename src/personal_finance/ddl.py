@@ -77,6 +77,19 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "merchant_aliases",
+        """
+        CREATE TABLE IF NOT EXISTS merchant_aliases (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            pattern TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            note TEXT
+        )
+        """,
+    ),
+    (
         "merchant_embeddings",
         """
         CREATE TABLE IF NOT EXISTS merchant_embeddings (

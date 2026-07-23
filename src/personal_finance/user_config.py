@@ -51,6 +51,8 @@ _CONFIG_FILES: dict[str, str] = {
     "taxonomy": "taxonomy.yaml",
     "rules": "rules.yaml",
     "budgets": "budgets.yaml",
+    "merchant_aliases": "merchants.yaml",
+    "known_cities": "places.yaml",
 }
 
 
@@ -148,6 +150,22 @@ class TaxonomyNode(_ConfigModel):
         return value
 
 
+def _validate_duckdb_regex(value: str) -> str:
+    """Compile a pattern against DuckDB's own regex engine (RE2), not Python's
+    `re`: they differ (RE2 has no backreferences/lookaround, and a mid-pattern
+    inline flag like "a(?i)bc" is silently NOT equivalent to a leading one). A
+    pattern that passes Python's re.compile can still error, or silently
+    mismatch, when dbt actually runs it — better to fail here, at config load,
+    than deep inside a dbt build.
+    """
+    try:
+        duckdb.sql("select regexp_matches('', ?)", params=[value])
+    except duckdb.Error as exc:
+        msg = f"invalid regular expression {value!r}: {exc}"
+        raise ValueError(msg) from exc
+    return value
+
+
 class RuleApplyField(StrEnum):
     """Transaction fields a rule's pattern may be matched against."""
 
@@ -176,18 +194,25 @@ class RuleConfig(_ConfigModel):
     @field_validator("pattern")
     @classmethod
     def _pattern_compiles(cls, value: str) -> str:
-        # Validated against DuckDB's own regex engine (RE2), not Python's `re`:
-        # they differ (RE2 has no backreferences/lookaround, and a mid-pattern
-        # inline flag like "a(?i)bc" is silently NOT equivalent to a leading
-        # one). A pattern that passes Python's re.compile can still error, or
-        # silently mismatch, when dbt actually runs it — better to fail here,
-        # at config load, than deep inside a dbt build.
-        try:
-            duckdb.sql("select regexp_matches('', ?)", params=[value])
-        except duckdb.Error as exc:
-            msg = f"invalid regular expression {value!r}: {exc}"
-            raise ValueError(msg) from exc
-        return value
+        return _validate_duckdb_regex(value)
+
+
+class MerchantAliasConfig(_ConfigModel):
+    """A merchant-name alias: regex match → canonical name.
+
+    Applied in file order (first match wins) against ``merchant_name`` (the
+    generic ``normalize_merchant`` macro's output) by the
+    ``silver_transactions`` dbt model, resolving brand variants and other
+    aliases the generic macro can't — see transform/models/silver/silver_transactions.sql.
+    """
+
+    pattern: str = Field(min_length=1)
+    canonical_name: str = Field(min_length=1)
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_compiles(cls, value: str) -> str:
+        return _validate_duckdb_regex(value)
 
 
 class BudgetConfig(_ConfigModel):
@@ -206,6 +231,10 @@ class UserConfig(_ConfigModel):
     taxonomy: list[TaxonomyNode] = Field(default_factory=list)
     rules: list[RuleConfig] = Field(default_factory=list)
     budgets: list[BudgetConfig] = Field(default_factory=list)
+    merchant_aliases: list[MerchantAliasConfig] = Field(default_factory=list)
+    # Known city names (no trailing state code to anchor on) that
+    # normalize_merchant can't safely strip generically — see merchants.yaml.
+    known_cities: list[str] = Field(default_factory=list)
 
     def category_paths(self) -> set[str]:
         """Return every category path defined by the taxonomy."""

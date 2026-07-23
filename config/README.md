@@ -1,6 +1,6 @@
 # User configuration
 
-The pipeline is driven by four YAML files in this directory:
+The pipeline is driven by six YAML files in this directory:
 
 | File | Configures |
 |------|-----------|
@@ -8,6 +8,8 @@ The pipeline is driven by four YAML files in this directory:
 | `taxonomy.yaml` | The hierarchical category tree (e.g. `essentials/groceries/apples`) |
 | `rules.yaml` | Deterministic regex → category rules (stage 1 of the enrichment cascade) |
 | `budgets.yaml` | Budget buckets over category subtrees |
+| `merchants.yaml` | Merchant-name aliases (brand variants the generic normalizer can't resolve) |
+| `places.yaml` | Known city names the normalizer can strip with no state code to anchor on |
 
 ## Setup
 
