@@ -3,6 +3,11 @@
 -- taxonomy) — so summing every root category's transaction_count must equal
 -- the total categorized, non-transfer transaction count. Fails (returns a
 -- row) if the rollup logic double-counts or drops a transaction anywhere.
+--
+-- root_total is coalesced to -1 (not 0) rather than left null: a taxonomy
+-- with no root category at all is itself the failure this test should catch,
+-- and `null != categorized_count` would otherwise evaluate to unknown and
+-- silently drop the row instead of failing.
 
 with totals as (
     select count(*) as categorized_count
@@ -12,7 +17,7 @@ with totals as (
 ),
 
 root_sum as (
-    select sum(transaction_count) as root_total
+    select coalesce(sum(transaction_count), -1) as root_total
     from {{ ref('gold_category_rollups') }}
     where depth = 0
 )
