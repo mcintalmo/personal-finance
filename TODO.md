@@ -13,9 +13,9 @@
 > Phase 3 (Core cleaning) complete — demo verified 2026-07-19: `pf transform` → silver
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
-
-- [ ] ⏳ IN PROGRESS — Category rollups through the hierarchy at every level (gold mart over
-      silver_transaction_categories + gold_category_paths)
+> **Phase 4 (Categorization) complete** — demo verified 2026-07-22: every dummy transaction
+> categorized with confidence + provenance across all four cascade stages (rules → embedding
+> similarity → local-LLM fallback → human review), rolled up through the taxonomy at every level.
 
 ## Backlog (later phases)
 

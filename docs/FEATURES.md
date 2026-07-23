@@ -29,7 +29,7 @@
 - [x] Embedding-similarity classifier vs. labeled history (nomic-embed-text via Ollama)
 - [x] Local LLM fallback for the ambiguous tail
 - [x] Human review queue for low-confidence assignments; corrections stored as labels and fed back to the classifier
-- [ ] Category rollups through the hierarchy at every level
+- [x] Category rollups through the hierarchy at every level
 
 ## 5. Receipts & line items
 - [ ] Receipt upload (photo/PDF) → vision LLM via Ollama → structured JSON (merchant, date, total, line items)
