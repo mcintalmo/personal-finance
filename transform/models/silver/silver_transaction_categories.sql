@@ -64,19 +64,14 @@ candidates as (
     from tx as t inner join rules as r on r.applies_to = 'account_name'
 ),
 
+-- First match wins: lowest priority (file order) per transaction — shared
+-- with silver_transactions.sql's merchant_aliases resolution via this macro.
 matched as (
     select *
     from candidates
     where matched_field is not null
     and regexp_matches(matched_field, pattern)
-),
-
--- First match wins: lowest priority (file order) per transaction.
-ranked as (
-    select
-        *,
-        row_number() over (partition by transaction_id order by priority) as rnk
-    from matched
+    qualify {{ first_match_wins('transaction_id', 'priority') }}
 )
 
 select
@@ -86,5 +81,4 @@ select
     pattern as matched_pattern,
     'rule' as categorization_source,
     1.0 as categorization_confidence
-from ranked
-where rnk = 1
+from matched

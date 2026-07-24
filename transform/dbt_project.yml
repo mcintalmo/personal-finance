@@ -26,6 +26,12 @@ vars:
   # to trust — left uncategorized for a later stage (human review) instead.
   llm_model: phi3:mini
   llm_confidence_threshold: 0.50
+  # Known city names normalize_merchant can safely strip as a trailing
+  # locality even with no state code to anchor on (e.g. "THAI GINGER
+  # BELLEVUE" -> "THAI GINGER"). Sourced from places.yaml via `pf transform`;
+  # empty by default so a config-free build is a no-op here, same as every
+  # other cascade stage.
+  known_cities: []
 
 clean-targets:
   - target

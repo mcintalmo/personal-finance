@@ -6,6 +6,7 @@ tests are wired into CI with no extra workflow step: if a dbt data test fails,
 CI fails.
 """
 
+import json
 import warnings
 from decimal import Decimal
 from pathlib import Path
@@ -17,9 +18,10 @@ from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id
-from personal_finance.seed import seed_categories, seed_rules
+from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.synth import generate_scenario, write_scenario
 from personal_finance.user_config import (
+    MerchantAliasConfig,
     RuleApplyField,
     RuleConfig,
     category_id_for_path,
@@ -61,6 +63,7 @@ def built_warehouse(tmp_path_factory):
         create_schema(conn)
         seed_categories(conn, config.taxonomy)
         seed_rules(conn, config.rules)
+        seed_merchant_aliases(conn, config.merchant_aliases)
 
     exports = root / "exports"
     write_scenario(generate_scenario(seed=42, months=2), exports)
@@ -83,6 +86,8 @@ def built_warehouse(tmp_path_factory):
                     str(REPO_ROOT / "transform"),
                     "--profiles-dir",
                     str(REPO_ROOT / "transform"),
+                    "--vars",
+                    json.dumps({"known_cities": config.known_cities}),
                 ]
             )
     finally:
@@ -112,7 +117,7 @@ def embedding_warehouse(built_warehouse):
     them up. Views are idempotently recreated, so rebuilding on top of the
     already-built warehouse is safe.
     """
-    warehouse, bronze, _config, _ = built_warehouse
+    warehouse, bronze, config, _ = built_warehouse
     with duckdb.connect(str(warehouse)) as conn:
         for name, vector in _SYNTHETIC_EMBEDDINGS.items():
             conn.execute(
@@ -142,8 +147,13 @@ def embedding_warehouse(built_warehouse):
                     "--profiles-dir",
                     str(REPO_ROOT / "transform"),
                     "--vars",
-                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
-                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
                 ]
             )
     finally:
@@ -202,6 +212,7 @@ def partial_merchant_match_warehouse(tmp_path_factory):
         create_schema(conn)
         seed_categories(conn, config.taxonomy)
         seed_rules(conn, rules)
+        seed_merchant_aliases(conn, config.merchant_aliases)
         conn.execute(
             "INSERT INTO merchant_embeddings (id, created_at, merchant_name, model, embedding) "
             "VALUES ($id, now(), $merchant_name, $model, $embedding)",
@@ -229,8 +240,13 @@ def partial_merchant_match_warehouse(tmp_path_factory):
                     "--profiles-dir",
                     str(REPO_ROOT / "transform"),
                     "--vars",
-                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
-                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}}}',
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
                 ]
             )
     finally:
@@ -257,7 +273,7 @@ def llm_warehouse(embedding_warehouse, built_warehouse):
     up.
     """
     warehouse = embedding_warehouse
-    _, bronze, _config, _ = built_warehouse
+    _, bronze, config, _ = built_warehouse
     with duckdb.connect(str(warehouse)) as conn:
         for name, (path, confidence) in _SYNTHETIC_LLM_CATEGORIES.items():
             conn.execute(
@@ -289,10 +305,15 @@ def llm_warehouse(embedding_warehouse, built_warehouse):
                     "--profiles-dir",
                     str(REPO_ROOT / "transform"),
                     "--vars",
-                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
-                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}, '
-                    f'"llm_model": "{_TEST_LLM_MODEL}", '
-                    f'"llm_confidence_threshold": {_TEST_LLM_CONFIDENCE_THRESHOLD}}}',
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_CONFIDENCE_THRESHOLD,
+                            "llm_model": _TEST_LLM_MODEL,
+                            "llm_confidence_threshold": _TEST_LLM_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
                 ]
             )
     finally:
@@ -313,7 +334,7 @@ def human_warehouse(llm_warehouse, built_warehouse):
     2-level/zero-activity cases the other fixtures cover.
     """
     warehouse = llm_warehouse
-    _, bronze, _config, _ = built_warehouse
+    _, bronze, config, _ = built_warehouse
     with duckdb.connect(str(warehouse)) as conn:
         (overridden_id,) = conn.execute(
             """
@@ -369,10 +390,15 @@ def human_warehouse(llm_warehouse, built_warehouse):
                     "--profiles-dir",
                     str(REPO_ROOT / "transform"),
                     "--vars",
-                    f'{{"embedding_model": "{_TEST_EMBEDDING_MODEL}", '
-                    f'"embedding_confidence_threshold": {_TEST_CONFIDENCE_THRESHOLD}, '
-                    f'"llm_model": "{_TEST_LLM_MODEL}", '
-                    f'"llm_confidence_threshold": {_TEST_LLM_CONFIDENCE_THRESHOLD}}}',
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_CONFIDENCE_THRESHOLD,
+                            "llm_model": _TEST_LLM_MODEL,
+                            "llm_confidence_threshold": _TEST_LLM_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
                 ]
             )
     finally:
@@ -663,6 +689,134 @@ class TestSilverMerchants:
             ).fetchone()
         assert dim_total == named_txns  # every named transaction is counted once
         assert dim_rows > 0
+
+
+class TestConfigDrivenMerchantNormalization:
+    """Coverage for the config-driven backlog item: known_cities (places.yaml)
+    strips a bare-city suffix the generic macro can't (no state to anchor
+    on), and merchant_aliases (merchants.yaml) resolves brand variants
+    afterward — both exercised end-to-end via config/examples/, not just
+    unit-tested in isolation."""
+
+    def test_known_city_with_no_state_is_stripped(self, built_warehouse):
+        """THAI GINGER BELLEVUE has no state suffix (unlike CHEVRON 0093
+        BELLEVUE WA, already handled generically) -- config/examples/places.yaml
+        lists 'Bellevue', so it must collapse to THAI GINGER."""
+        warehouse, _, _, _ = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            names = {
+                name
+                for (name,) in conn.execute(
+                    "select distinct merchant_name from main_silver.silver_transactions"
+                ).fetchall()
+            }
+        assert "THAI GINGER" in names
+        assert "THAI GINGER BELLEVUE" not in names
+
+    def test_known_cities_var_is_empty_by_default(self):
+        """A config-free build (no places.yaml) must be a no-op here, same as
+        every other cascade stage — see dbt_project.yml's known_cities: []."""
+        with Path(REPO_ROOT / "transform" / "dbt_project.yml").open(encoding="utf-8") as f:
+            assert "known_cities: []" in f.read()
+
+
+@pytest.fixture(scope="module")
+def merchant_alias_warehouse(tmp_path_factory):
+    """A small, self-contained warehouse demonstrating merchant_aliases
+    (merchants.yaml): two raw descriptors the generic normalize_merchant
+    macro leaves genuinely distinct ("FOO BAR ONE", "FOO BAR TWO" -- no
+    numbers/domains/store words for it to strip) must collapse to one
+    canonical name, and a narrower, higher-priority alias must win over a
+    broader one that would also match.
+    """
+    root = tmp_path_factory.mktemp("wh_merchant_alias")
+    warehouse = root / "warehouse.duckdb"
+    bronze = root / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    sources = {s.name: s for s in config.sources}
+
+    exports = root / "exports"
+    exports.mkdir()
+    chase_csv = exports / "chase_checking.csv"
+    chase_csv.write_text(
+        "Posting Date,Amount,Description\n"
+        "01/15/2026,-10.00,FOO BAR ONE\n"
+        "01/16/2026,-20.00,FOO BAR TWO\n"
+        "01/17/2026,-30.00,FOO BAR SPECIAL\n"
+    )
+    run_ingestion(sources["chase_checking"], chase_csv, bronze)
+
+    aliases = [
+        # Narrower/higher-priority: must win for "FOO BAR SPECIAL" over the
+        # broader "^FOO BAR" pattern below it.
+        MerchantAliasConfig(pattern="(?i)^FOO BAR SPECIAL", canonical_name="FOO BAR SPECIAL CO"),
+        MerchantAliasConfig(pattern="(?i)^FOO BAR", canonical_name="FOO BAR INC"),
+    ]
+    with duckdb.connect(str(warehouse)) as conn:
+        create_schema(conn)
+        seed_categories(conn, config.taxonomy)
+        seed_rules(conn, config.rules)
+        seed_merchant_aliases(conn, aliases)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+class TestMerchantAliasResolution:
+    def test_distinct_descriptors_collapse_to_the_canonical_name(self, merchant_alias_warehouse):
+        with duckdb.connect(str(merchant_alias_warehouse)) as conn:
+            names = {
+                name
+                for (name,) in conn.execute(
+                    "select distinct merchant_name from main_silver.silver_transactions "
+                    "where merchant_name in ('FOO BAR ONE', 'FOO BAR TWO', 'FOO BAR INC')"
+                ).fetchall()
+            }
+        assert names == {"FOO BAR INC"}
+
+    def test_narrower_higher_priority_alias_wins(self, merchant_alias_warehouse):
+        with duckdb.connect(str(merchant_alias_warehouse)) as conn:
+            (name,) = conn.execute(
+                "select merchant_name from main_silver.silver_transactions "
+                "where description_raw = 'FOO BAR SPECIAL'"
+            ).fetchone()
+        assert name == "FOO BAR SPECIAL CO"
+
+    def test_is_transfer_and_other_columns_unaffected(self, merchant_alias_warehouse):
+        """The `base.* exclude (merchant_name)` refactor of silver_transactions.sql
+        must not disturb any other passthrough column, including ones with no
+        other test/schema.yml coverage (external_id, source_file, ingested_at)."""
+        with duckdb.connect(str(merchant_alias_warehouse)) as conn:
+            rows = conn.execute(
+                "select transaction_id, is_transfer, amount, external_id, source_file, "
+                "ingested_at from main_silver.silver_transactions"
+            ).fetchall()
+        assert rows
+        for _transaction_id, is_transfer, amount, external_id, source_file, ingested_at in rows:
+            assert is_transfer is False  # no transfer pairs in this tiny fixture
+            assert amount < 0
+            assert external_id is None  # chase_checking.csv fixture has no FITID column
+            assert source_file.endswith("chase_checking.csv")
+            assert ingested_at is not None
 
 
 class TestSilverTransfers:

@@ -4,8 +4,13 @@ import duckdb
 import pytest
 
 from personal_finance.ddl import create_schema
-from personal_finance.seed import seed_categories, seed_rules
-from personal_finance.user_config import RuleConfig, TaxonomyNode, category_id_for_path
+from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
+from personal_finance.user_config import (
+    MerchantAliasConfig,
+    RuleConfig,
+    TaxonomyNode,
+    category_id_for_path,
+)
 
 
 @pytest.fixture
@@ -106,6 +111,16 @@ def count_rules(conn):
     return conn.execute("SELECT count(*) FROM rules").fetchone()[0]
 
 
+MERCHANT_ALIASES = [
+    MerchantAliasConfig(pattern="(?i)^costco", canonical_name="COSTCO"),
+    MerchantAliasConfig(pattern="(?i)^amzn", canonical_name="AMAZON"),
+]
+
+
+def count_merchant_aliases(conn):
+    return conn.execute("SELECT count(*) FROM merchant_aliases").fetchone()[0]
+
+
 class TestSeedRules:
     def test_seeds_all_rules_in_priority_order(self, conn):
         seed_categories(conn, TAXONOMY)
@@ -141,3 +156,27 @@ class TestSeedRules:
         seed_rules(conn, list(reversed(RULES)))
         rows = conn.execute("SELECT pattern, priority FROM rules ORDER BY priority").fetchall()
         assert rows == [("(?i)netflix", 0), ("(?i)kroger|safeway", 1)]
+
+
+class TestSeedMerchantAliases:
+    def test_seeds_all_aliases_in_priority_order(self, conn):
+        seeded = seed_merchant_aliases(conn, MERCHANT_ALIASES)
+        assert count_merchant_aliases(conn) == 2
+        assert [a.priority for a in seeded] == [0, 1]
+        assert [a.canonical_name for a in seeded] == ["COSTCO", "AMAZON"]
+
+    def test_reseeding_fully_replaces(self, conn):
+        """Like rules, aliases have no note to preserve — a shrunk or
+        reordered alias list is reflected exactly, not merged."""
+        seed_merchant_aliases(conn, MERCHANT_ALIASES)
+        reseeded = seed_merchant_aliases(conn, [MERCHANT_ALIASES[1]])
+        assert count_merchant_aliases(conn) == 1
+        assert reseeded[0].canonical_name == "AMAZON"
+        assert reseeded[0].priority == 0  # reflects its new (only) position
+
+    def test_reordering_changes_priority(self, conn):
+        seed_merchant_aliases(conn, list(reversed(MERCHANT_ALIASES)))
+        rows = conn.execute(
+            "SELECT canonical_name, priority FROM merchant_aliases ORDER BY priority"
+        ).fetchall()
+        assert rows == [("AMAZON", 0), ("COSTCO", 1)]

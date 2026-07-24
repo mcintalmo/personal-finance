@@ -1,4 +1,4 @@
-"""Seed the ``categories`` and ``rules`` tables from user config.
+"""Seed the ``categories``, ``rules``, and ``merchant_aliases`` tables from user config.
 
 Category identity is the taxonomy path (see
 :func:`personal_finance.user_config.category_id_for_path`), so seeding is an
@@ -12,15 +12,17 @@ categories is a deliberate, separate operation for a later phase.
 User-authored ``note`` values are never touched by seeding — notes belong to
 the user, not to the config.
 
-Rules are different: nothing else references a rule's id, and a rule carries
-no user-editable state, so re-seeding fully replaces the table — removing or
-reordering a rule in ``rules.yaml`` takes effect immediately.
+Rules and merchant aliases are different: nothing else references their ids,
+and neither carries user-editable state, so re-seeding fully replaces each
+table — removing or reordering an entry in ``rules.yaml``/``merchants.yaml``
+takes effect immediately.
 """
 
 from typing import TYPE_CHECKING
 
-from personal_finance.models import Rule
+from personal_finance.models import MerchantAlias, Rule
 from personal_finance.user_config import (
+    MerchantAliasConfig,
     RuleConfig,
     TaxonomyNode,
     category_id_for_path,
@@ -92,4 +94,40 @@ def seed_rules(conn: duckdb.DuckDBPyConnection, rules: list[RuleConfig]) -> list
     ]
     for rule in seeded:
         conn.execute(_INSERT_RULE, rule.model_dump())
+    return seeded
+
+
+_INSERT_MERCHANT_ALIAS = """
+INSERT INTO merchant_aliases (id, created_at, pattern, canonical_name, priority, note)
+VALUES ($id, $created_at, $pattern, $canonical_name, $priority, $note)
+"""
+
+
+def seed_merchant_aliases(
+    conn: duckdb.DuckDBPyConnection, aliases: list[MerchantAliasConfig]
+) -> list[MerchantAlias]:
+    """Replace the ``merchant_aliases`` table with the current ``merchants.yaml`` config.
+
+    Same full-replace contract as :func:`seed_rules`: nothing else references
+    an alias's id and it carries no user-editable state, so re-seeding fully
+    replaces the table.
+
+    Args:
+        conn: An open DuckDB connection with the core schema created.
+        aliases: The alias list, e.g. ``load_user_config().merchant_aliases``.
+
+    Returns:
+        The seeded aliases, in priority order (first match wins).
+    """
+    conn.execute("DELETE FROM merchant_aliases")
+    seeded = [
+        MerchantAlias(
+            pattern=alias.pattern,
+            canonical_name=alias.canonical_name,
+            priority=priority,
+        )
+        for priority, alias in enumerate(aliases)
+    ]
+    for alias in seeded:
+        conn.execute(_INSERT_MERCHANT_ALIAS, alias.model_dump())
     return seeded

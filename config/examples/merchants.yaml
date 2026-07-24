@@ -1,0 +1,16 @@
+# Merchant-name aliases — resolves brand variants the generic
+# normalize_merchant macro can't (see docs/source-schemas.md and TODO.md's
+# "Merchant normalization" backlog entry: evaluated cleanco and public
+# merchant/brand datasets first — neither fits a bank-statement descriptor,
+# as opposed to a legal-entity or MCC-coded record — so this config-driven
+# step is the right level for the remaining tail). First matching pattern
+# wins (file order = priority), applied to merchant_name (the
+# normalize_merchant-cleaned key) by silver_transactions.sql.
+#
+# Illustrative example (does not fire against this repo's dummy synth data):
+# a warehouse club's gas station and its main store post under suffixes the
+# generic macro has no reason to touch ("COSTCO WHSE" / "COSTCO GAS"), so
+# without an alias they'd stay two distinct merchants.
+
+- pattern: "(?i)^costco"
+  canonical_name: "COSTCO"

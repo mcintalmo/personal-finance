@@ -1,12 +1,15 @@
 """User-editable domain configuration loaded from YAML files.
 
-Four files in the config directory (``Settings.config_dir``, default ``config/``)
+Six files in the config directory (``Settings.config_dir``, default ``config/``)
 drive the pipeline without code changes:
 
     sources.yaml    data sources to ingest (custom names, column mappings)
     taxonomy.yaml   the hierarchical category tree (apples → groceries → essentials)
     rules.yaml      deterministic merchant/pattern → category rules
     budgets.yaml    budget buckets over category subtrees
+    merchants.yaml  merchant-name aliases (regex → canonical brand name)
+    places.yaml     known city names normalize_merchant can strip as a bare
+                    trailing locality (no state code to anchor on)
 
 Categories are referenced across files by slash-separated path from the taxonomy
 root, e.g. ``essentials/groceries/apples``. Referential integrity is validated at
@@ -51,6 +54,8 @@ _CONFIG_FILES: dict[str, str] = {
     "taxonomy": "taxonomy.yaml",
     "rules": "rules.yaml",
     "budgets": "budgets.yaml",
+    "merchant_aliases": "merchants.yaml",
+    "known_cities": "places.yaml",
 }
 
 
@@ -148,6 +153,22 @@ class TaxonomyNode(_ConfigModel):
         return value
 
 
+def _validate_duckdb_regex(value: str) -> str:
+    """Compile a pattern against DuckDB's own regex engine (RE2), not Python's
+    `re`: they differ (RE2 has no backreferences/lookaround, and a mid-pattern
+    inline flag like "a(?i)bc" is silently NOT equivalent to a leading one). A
+    pattern that passes Python's re.compile can still error, or silently
+    mismatch, when dbt actually runs it — better to fail here, at config load,
+    than deep inside a dbt build.
+    """
+    try:
+        duckdb.sql("select regexp_matches('', ?)", params=[value])
+    except duckdb.Error as exc:
+        msg = f"invalid regular expression {value!r}: {exc}"
+        raise ValueError(msg) from exc
+    return value
+
+
 class RuleApplyField(StrEnum):
     """Transaction fields a rule's pattern may be matched against."""
 
@@ -176,18 +197,34 @@ class RuleConfig(_ConfigModel):
     @field_validator("pattern")
     @classmethod
     def _pattern_compiles(cls, value: str) -> str:
-        # Validated against DuckDB's own regex engine (RE2), not Python's `re`:
-        # they differ (RE2 has no backreferences/lookaround, and a mid-pattern
-        # inline flag like "a(?i)bc" is silently NOT equivalent to a leading
-        # one). A pattern that passes Python's re.compile can still error, or
-        # silently mismatch, when dbt actually runs it — better to fail here,
-        # at config load, than deep inside a dbt build.
-        try:
-            duckdb.sql("select regexp_matches('', ?)", params=[value])
-        except duckdb.Error as exc:
-            msg = f"invalid regular expression {value!r}: {exc}"
-            raise ValueError(msg) from exc
-        return value
+        return _validate_duckdb_regex(value)
+
+
+class MerchantAliasConfig(_ConfigModel):
+    """A merchant-name alias: regex match → canonical name.
+
+    Applied in file order (first match wins) against ``merchant_name`` (the
+    generic ``normalize_merchant`` macro's output) by the
+    ``silver_transactions`` dbt model, resolving brand variants and other
+    aliases the generic macro can't — see transform/models/silver/silver_transactions.sql.
+    """
+
+    pattern: str = Field(min_length=1)
+    canonical_name: str = Field(min_length=1)
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_compiles(cls, value: str) -> str:
+        return _validate_duckdb_regex(value)
+
+    @field_validator("canonical_name")
+    @classmethod
+    def _canonical_name_is_uppercase(cls, value: str) -> str:
+        # merchant_name is always the uppercase normalize_merchant key (see
+        # transform/macros/normalize_merchant.sql); a mixed-case canonical_name
+        # would silently fragment one merchant into two distinct merchant_name
+        # values instead of collapsing them.
+        return value.upper()
 
 
 class BudgetConfig(_ConfigModel):
@@ -206,6 +243,10 @@ class UserConfig(_ConfigModel):
     taxonomy: list[TaxonomyNode] = Field(default_factory=list)
     rules: list[RuleConfig] = Field(default_factory=list)
     budgets: list[BudgetConfig] = Field(default_factory=list)
+    merchant_aliases: list[MerchantAliasConfig] = Field(default_factory=list)
+    # Known city names (no trailing state code to anchor on) that
+    # normalize_merchant can't safely strip generically — see merchants.yaml.
+    known_cities: list[str] = Field(default_factory=list)
 
     def category_paths(self) -> set[str]:
         """Return every category path defined by the taxonomy."""

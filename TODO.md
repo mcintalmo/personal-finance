@@ -24,18 +24,35 @@ one phase at a time when the previous phase's demo is complete.
 
 **Phase 3 merchant follow-ups** (deferred — evaluate existing tooling before hand-rolling more):
 
-- [ ] Merchant normalization — leverage existing data, don't hand-roll: evaluate Python
-      libraries (e.g. cleanco) and public merchant/brand datasets (MCC lists, OpenCorporates,
-      merchant-name normalization corpora) to replace/augment the regex macro. **Do this before**
-      the config-driven aliases below.
-- [ ] Config-driven merchant aliases: `merchants.yaml` regex→canonical name + place list to
-      resolve city-only suffixes and brand variants the generic macro can't
+- [x] Merchant normalization evaluation + config-driven aliases: see Done below.
 - [ ] Merchant resolution for the outlier tail: fuzzy match / semantic (embedding) search /
       local-LLM classifier to map descriptors the deterministic cleaner can't resolve to a
       canonical merchant — feeds the Phase 4 categorizer
 
 ## Done
 
+- [x] Merchant normalization evaluation + config-driven aliases (Phase 3 follow-up). Evaluated
+      the two tools TODO.md called out before hand-rolling more: `cleanco` strips legal-entity
+      suffixes (Inc/LLC/GmbH) — a different problem from bank-statement descriptor noise, which
+      `normalize_merchant` already targets; public datasets (MCC codes, OpenCorporates) don't fit
+      either — MCC isn't present in consumer CSV/OFX exports, OpenCorporates is legal-entity
+      registry data, and a live merchant-lookup API would leak real transaction descriptors off
+      the local-first pipeline. Concluded: proceed directly to config-driven aliases. Two new
+      YAML files: `merchants.yaml` (regex → canonical name, first match wins by file order, same
+      seeded-table + cross-join pattern as `rules.yaml`) and `places.yaml` (known city names
+      `normalize_merchant` can strip as a trailing locality with no state code to anchor on — the
+      generic macro only strips "CITY ST" when a two-letter state follows). New
+      `personal_finance.models.MerchantAlias` + `merchant_aliases` table (`seed_merchant_aliases`,
+      wired into `pf init-db`); `known_cities` flows from config into `pf transform` as a dbt var
+      (`--vars`), extending the macro with a new conditional stripping step. `merchants.yaml`
+      resolution applied in `silver_transactions.sql` itself (not a separate model) so every
+      downstream consumer — rules, embedding/LLM cascade, rollups — sees the canonicalized name.
+      **Live-verified end-to-end**: `THAI GINGER BELLEVUE` (no state suffix, unlike the already-
+      handled `CHEVRON 0093 BELLEVUE WA`) now normalizes to `THAI GINGER` with `places.yaml`
+      listing "Bellevue" — a real synth-data merchant, not just an isolated fixture —
+      `src/personal_finance/user_config.py`, `src/personal_finance/seed.py`,
+      `transform/macros/normalize_merchant.sql`, `transform/models/silver/silver_transactions.sql`
+      (2026-07-22).
 - [x] Human review queue: the final stage of the categorization cascade, and the highest
       priority — unlike stages 1-3 (additive: each only covers what prior stages missed
       entirely), a human correction can **override** an earlier stage's wrong assignment, not

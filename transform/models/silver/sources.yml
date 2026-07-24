@@ -13,6 +13,12 @@ sources:
           Deterministic pattern → category rules seeded from config rules.yaml
           (personal_finance.seed.seed_rules); priority is file order, first
           match wins.
+      - name: merchant_aliases
+        description: >-
+          Deterministic pattern → canonical merchant name seeded from config
+          merchants.yaml (personal_finance.seed.seed_merchant_aliases);
+          priority is file order, first match wins. Resolves brand variants
+          the generic normalize_merchant macro can't.
       - name: merchant_embeddings
         description: >-
           Cached embedding vector per distinct merchant_name, computed via a

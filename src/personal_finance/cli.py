@@ -16,6 +16,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf review      list the categorization cascade's ambiguous tail and record corrections
 """
 
+import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,7 +41,7 @@ from personal_finance.llm_categorize import (
     fetch_category_paths,
 )
 from personal_finance.review import fetch_review_queue, record_label
-from personal_finance.seed import seed_categories, seed_rules
+from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver
@@ -50,7 +51,17 @@ from personal_finance.synth import (
     write_receipts,
     write_scenario,
 )
-from personal_finance.user_config import load_user_config
+from personal_finance.user_config import UserConfig, load_user_config
+
+
+def _load_config_or_exit(config_dir: Path | None) -> UserConfig:
+    """Load user config, exiting with a clean message on ConfigurationError."""
+    try:
+        return load_user_config(config_dir)
+    except ConfigurationError as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
 
 app = typer.Typer(
     name="pf",
@@ -91,25 +102,28 @@ def init_db(
         None, help="User config directory (default: Settings.config_dir)."
     ),
 ) -> None:
-    """Create the warehouse schema and seed the category taxonomy and rules."""
+    """Create the warehouse schema and seed the category taxonomy, rules, and merchant aliases."""
     warehouse = get_settings().data.warehouse_path
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
     warehouse.parent.mkdir(parents=True, exist_ok=True)
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
         categories = seed_categories(conn, config.taxonomy)
         rules = seed_rules(conn, config.rules)
-    typer.echo(f"Initialized {warehouse}: {len(categories)} categories, {len(rules)} rules seeded")
+        aliases = seed_merchant_aliases(conn, config.merchant_aliases)
+    typer.echo(
+        f"Initialized {warehouse}: {len(categories)} categories, {len(rules)} rules, "
+        f"{len(aliases)} merchant aliases seeded"
+    )
 
 
 @app.command()
 def transform(
     project_dir: Path = typer.Option(
         Path("transform"), help="dbt project directory (run from the repo root)."
+    ),
+    config_dir: Path | None = typer.Option(
+        None, help="User config directory (default: Settings.config_dir)."
     ),
 ) -> None:
     """Run the dbt medallion build: silver/gold models plus data tests."""
@@ -124,13 +138,22 @@ def transform(
             f"No ingested data under {bronze} — run `pf ingest` (or `pf watch`) first.", err=True
         )
         raise typer.Exit(code=1)
+    config = _load_config_or_exit(config_dir)
     os.environ.setdefault("DATA_WAREHOUSE_PATH", str(warehouse))
     os.environ.setdefault("DATA_BRONZE_PATH", str(bronze))
 
     from dbt.cli.main import dbtRunner  # slow import; deferred to this command
 
     result = dbtRunner().invoke(
-        ["build", "--project-dir", str(project_dir), "--profiles-dir", str(project_dir)]
+        [
+            "build",
+            "--project-dir",
+            str(project_dir),
+            "--profiles-dir",
+            str(project_dir),
+            "--vars",
+            json.dumps({"known_cities": config.known_cities}),
+        ]
     )
     if not result.success:
         typer.echo("dbt build failed", err=True)
@@ -160,11 +183,7 @@ def ingest(
     Re-ingesting a file (or an overlapping export) is idempotent — rows already
     landed are skipped, so only genuinely-new rows are reported.
     """
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
 
     sources = {s.name: s for s in config.sources}
     if source is not None and source not in sources:
@@ -248,11 +267,7 @@ def watch(
     if not folder.is_dir():
         typer.echo(f"Not a directory: {folder}", err=True)
         raise typer.Exit(code=1)
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
 
     sources = {s.name: s for s in config.sources}
     if source is not None and source not in sources:
