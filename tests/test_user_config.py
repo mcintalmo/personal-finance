@@ -178,6 +178,23 @@ class TestModelValidation:
         assert source.column_map == {}
         assert source.currency == "USD"
 
+    def test_amazon_kind_needs_no_account_fields(self):
+        source = SourceConfig(name="amazon", kind=SourceKind.AMAZON)
+        assert source.account_name is None
+        assert source.account_type is None
+
+    def test_csv_kind_requires_account_fields(self):
+        with pytest.raises(ValueError, match="requires account_name/account_type"):
+            SourceConfig(
+                name="s",
+                kind=SourceKind.CSV,
+                column_map={"posted_on": "Date", "description_raw": "Desc", "amount": "Amt"},
+            )
+
+    def test_ofx_kind_requires_account_fields(self):
+        with pytest.raises(ValueError, match="requires account_name/account_type"):
+            SourceConfig(name="s", kind=SourceKind.OFX)
+
     def test_budget_amount_must_be_positive(self, tmp_path):
         write_config(
             tmp_path,

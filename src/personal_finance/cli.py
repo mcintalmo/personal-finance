@@ -57,8 +57,10 @@ from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_r
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver
 from personal_finance.synth import (
+    generate_amazon_orders,
     generate_receipts,
     generate_scenario,
+    write_amazon_orders,
     write_receipts,
     write_scenario,
 )
@@ -99,14 +101,18 @@ def synth(
     seed: int = typer.Option(42, help="RNG seed; same seed -> identical fixtures."),
     months: int = typer.Option(6, min=1, help="Months of activity to generate."),
 ) -> None:
-    """Generate dummy bank/card export files and receipt fixtures."""
+    """Generate dummy bank/card export files, receipt fixtures, and an Amazon
+    order-history export."""
     scenario = generate_scenario(seed=seed, months=months)
     export_files = write_scenario(scenario, out / "exports")
     receipts = generate_receipts(scenario, seed=seed)
     receipt_files = write_receipts(receipts, out / "receipts")
+    amazon_orders = generate_amazon_orders(scenario, seed=seed)
+    amazon_files = write_amazon_orders(amazon_orders, out / "amazon")
     typer.echo(
-        f"Wrote {len(export_files)} export files and {len(receipt_files)} receipt files "
-        f"({len(receipts)} receipts) to {out}"
+        f"Wrote {len(export_files)} export files, {len(receipt_files)} receipt files "
+        f"({len(receipts)} receipts), and {len(amazon_files)} Amazon order-history file(s) "
+        f"({len(amazon_orders)} line items) to {out}"
     )
 
 

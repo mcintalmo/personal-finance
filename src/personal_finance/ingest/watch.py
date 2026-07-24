@@ -36,7 +36,7 @@ from watchdog.observers import Observer
 
 from personal_finance.exceptions import IngestionError
 from personal_finance.ingest.dedup import bronze_row_count
-from personal_finance.ingest.pipeline import run_ingestion
+from personal_finance.ingest.pipeline import dataset_name_for, run_ingestion
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -112,12 +112,13 @@ def ingest_file(
             IngestStatus.UNMATCHED,
             detail=f"no source config named {resolved!r}",
         )
-    before = bronze_row_count(bronze_dir, source.name)
+    dataset_name = dataset_name_for(source)
+    before = bronze_row_count(bronze_dir, source.name, dataset_name)
     try:
         run_ingestion(source, file_path, bronze_dir)
     except IngestionError as exc:
         return IngestOutcome(file_path, source.name, IngestStatus.FAILED, detail=str(exc))
-    after = bronze_row_count(bronze_dir, source.name)
+    after = bronze_row_count(bronze_dir, source.name, dataset_name)
     return IngestOutcome(
         file_path,
         source.name,

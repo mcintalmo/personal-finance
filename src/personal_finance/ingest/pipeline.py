@@ -7,6 +7,7 @@ import dlt
 from dlt.destinations import filesystem
 
 from personal_finance.exceptions import IngestionError
+from personal_finance.ingest.amazon_source import amazon_order_items
 from personal_finance.ingest.csv_source import csv_transactions
 from personal_finance.ingest.dedup import existing_row_hashes
 from personal_finance.ingest.ofx_source import ofx_transactions
@@ -30,8 +31,10 @@ if TYPE_CHECKING:
 _INGEST_LOCK = threading.Lock()
 
 
-def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadInfo:
-    """Load one resource into ``bronze_dir/bronze/<source.name>/`` as Parquet.
+def _run(
+    source: SourceConfig, resource: DltResource, bronze_dir: Path, dataset_name: str = "bronze"
+) -> LoadInfo:
+    """Load one resource into ``bronze_dir/<dataset_name>/<source.name>/`` as Parquet.
 
     Idempotent append: bronze is append-only (dlt's filesystem destination has
     no merge), so before appending we drop any row whose ``row_hash`` already
@@ -41,23 +44,34 @@ def _run(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadI
     hash is keyed. The whole read-then-append is held under ``_INGEST_LOCK`` so
     concurrent ingests can't interleave.
 
+    ``dataset_name`` defaults to "bronze", the dataset every transaction-shaped
+    CSV/OFX source shares (dbt's ``bronze.transactions`` source globs
+    ``bronze/*/*.parquet`` — every subdirectory, auto-discovering a new bank
+    with no dbt change needed). A source whose rows are NOT transaction-shaped
+    (e.g. Amazon order-history — see ``amazon_source``) must land under a
+    *different* dataset, or that same wildcard glob would silently sweep it
+    into the generic transactions union too, corrupting it with NULL-heavy
+    rows for every column it doesn't share.
+
     Any IngestionError raised inside the resource is wrapped by dlt in
     PipelineStepFailed/ResourceExtractionError; this unwraps that chain so
     callers only ever see our exception type, per the exception-boundary
     convention.
     """
     with _INGEST_LOCK:
-        return _run_locked(source, resource, bronze_dir)
+        return _run_locked(source, resource, bronze_dir, dataset_name)
 
 
-def _run_locked(source: SourceConfig, resource: DltResource, bronze_dir: Path) -> LoadInfo:
-    seen = existing_row_hashes(bronze_dir, source.name)
+def _run_locked(
+    source: SourceConfig, resource: DltResource, bronze_dir: Path, dataset_name: str
+) -> LoadInfo:
+    seen = existing_row_hashes(bronze_dir, source.name, dataset_name)
     if seen:
         resource.add_filter(lambda row: row["row_hash"] not in seen)
     pipeline = dlt.pipeline(
-        pipeline_name=f"bronze_{source.name}",
+        pipeline_name=f"{dataset_name}_{source.name}",
         destination=filesystem(bucket_url=str(bronze_dir)),
-        dataset_name="bronze",
+        dataset_name=dataset_name,
         # Keep dlt's working state alongside the data, not in the user's home
         # (~/.dlt) — isolates state per warehouse and avoids cross-run
         # collisions on a globally-shared pipeline directory.
@@ -85,9 +99,35 @@ def run_csv_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -
     return _run(source, csv_transactions(source, file_path), bronze_dir)
 
 
+def dataset_name_for(source: SourceConfig) -> str:
+    """Return the bronze dataset a source's rows land in — see ``_run``.
+
+    Every ``SourceConfig.kind`` maps to exactly one dataset; used both here
+    and by callers (``watch.ingest_file``) that need to read back a source's
+    row count without duplicating the kind -> dataset mapping.
+    """
+    if source.kind == SourceKind.AMAZON:
+        return "bronze_amazon"
+    return "bronze"
+
+
 def run_ofx_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
     """Ingest one OFX/QFX export file into the bronze layer."""
     return _run(source, ofx_transactions(source, file_path), bronze_dir)
+
+
+def run_amazon_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
+    """Ingest one Amazon order-history export into its own bronze dataset.
+
+    Lands under ``bronze_amazon/``, not ``bronze/`` — see ``_run``'s docstring
+    for why an order-history row can't share the generic transactions dataset.
+    """
+    return _run(
+        source,
+        amazon_order_items(source, file_path),
+        bronze_dir,
+        dataset_name=dataset_name_for(source),
+    )
 
 
 def run_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
@@ -98,4 +138,6 @@ def run_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> Lo
     """
     if source.kind == SourceKind.OFX:
         return run_ofx_ingestion(source, file_path, bronze_dir)
+    if source.kind == SourceKind.AMAZON:
+        return run_amazon_ingestion(source, file_path, bronze_dir)
     return run_csv_ingestion(source, file_path, bronze_dir)

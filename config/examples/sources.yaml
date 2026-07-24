@@ -81,6 +81,12 @@
     description_raw: Description
   date_format: "%m/%d/%Y"
 
+# Amazon order-history (Privacy Central export) — enrichment, not a bank
+# account, so no account_name/account_type/column_map: the schema is fixed,
+# not user-configurable (see personal_finance.ingest.amazon_source).
+- name: amazon
+  kind: amazon
+
 # Amex and Discover invert our convention: charges are positive.
 - name: amex
   kind: csv
