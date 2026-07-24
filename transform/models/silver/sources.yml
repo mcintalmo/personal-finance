@@ -19,6 +19,14 @@ sources:
           merchants.yaml (personal_finance.seed.seed_merchant_aliases);
           priority is file order, first match wins. Resolves brand variants
           the generic normalize_merchant macro can't.
+      - name: merchant_merges
+        description: >-
+          Human-confirmed (or rejected) merchant-identity merges from the
+          embedding-similarity merge-candidate review queue
+          (personal_finance.merchant_merge, `pf review merge-candidates` /
+          `pf review merge`) — resolves descriptor variants merchants.yaml
+          aliases weren't written for. Latest decision per merchant_name
+          wins; applied after merchant_aliases in silver_transactions.sql.
       - name: merchant_embeddings
         description: >-
           Cached embedding vector per distinct merchant_name, computed via a

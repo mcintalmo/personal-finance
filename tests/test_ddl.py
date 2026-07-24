@@ -24,6 +24,8 @@ from personal_finance.models import (
     MerchantAlias,
     MerchantEmbedding,
     MerchantLlmCategory,
+    MerchantMerge,
+    MergeStatus,
     Rule,
     Transaction,
     TransactionSplit,
@@ -35,6 +37,7 @@ EXPECTED_TABLES = {
     "categories",
     "rules",
     "merchant_aliases",
+    "merchant_merges",
     "merchant_embeddings",
     "merchant_llm_categories",
     "transactions",
@@ -95,6 +98,12 @@ class TestRoundTrip:
             priority=0,
         )
         merchant_alias = MerchantAlias(pattern="(?i)^costco", canonical_name="COSTCO", priority=0)
+        merchant_merge = MerchantMerge(
+            merchant_name="TARGET T-1234",
+            canonical_name="TARGET 0099",
+            similarity=0.97,
+            status=MergeStatus.ACCEPTED,
+        )
         merchant_embedding = MerchantEmbedding(
             merchant_name="TRADER JOE'S", model="nomic-embed-text", embedding=[0.1, 0.2, 0.3]
         )
@@ -145,6 +154,7 @@ class TestRoundTrip:
         insert(conn, "categories", groceries)
         insert(conn, "rules", rule)
         insert(conn, "merchant_aliases", merchant_alias)
+        insert(conn, "merchant_merges", merchant_merge)
         insert(conn, "merchant_embeddings", merchant_embedding)
         insert(conn, "merchant_llm_categories", merchant_llm_category)
         insert(conn, "transactions", txn)

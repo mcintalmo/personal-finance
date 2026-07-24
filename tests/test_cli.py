@@ -375,6 +375,119 @@ class TestReview:
         assert "Unknown category path" in result.output
 
 
+class TestReviewMerge:
+    def test_requires_initialized_warehouse(self):
+        result = runner.invoke(app, ["review", "merge-candidates"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def test_requires_transform_has_run(self):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["review", "merge-candidates"])
+        assert result.exit_code == 1
+        assert "pf transform" in result.output
+
+    def test_merge_requires_initialized_warehouse(self):
+        result = runner.invoke(app, ["review", "merge", "A", "B"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def _build_transformed_warehouse(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "exports" / "chase_checking.csv"),
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+
+    def _two_merchant_names(self):
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            rows = conn.execute(
+                "select distinct merchant_name from main_silver.silver_transactions "
+                "where merchant_name is not null order by merchant_name limit 2"
+            ).fetchall()
+        return rows[0][0], rows[1][0]
+
+    def _insert_embedding(self, merchant_name, vector, id_):
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            conn.execute(
+                "insert into merchant_embeddings (id, created_at, merchant_name, model, embedding) "
+                "values ($id, now(), $name, 'nomic-embed-text', $vec)",
+                {"id": id_, "name": merchant_name, "vec": vector},
+            )
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_no_candidates_by_default(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        result = runner.invoke(app, ["review", "merge-candidates"])
+        assert result.exit_code == 0, result.output
+        assert "No merge candidates" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_lists_and_confirms_a_candidate(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        name_a, name_b = self._two_merchant_names()
+        self._insert_embedding(name_a, [1.0, 0.0], "e1")
+        self._insert_embedding(name_b, [1.0, 0.0001], "e2")
+
+        candidates = runner.invoke(app, ["review", "merge-candidates"])
+        assert candidates.exit_code == 0, candidates.output
+        assert name_a in candidates.output
+        assert name_b in candidates.output
+
+        merge = runner.invoke(app, ["review", "merge", name_a, name_b])
+        assert merge.exit_code == 0, merge.output
+        assert "Merged" in merge.output
+
+        after = runner.invoke(app, ["review", "merge-candidates"])
+        assert after.exit_code == 0, after.output
+        assert "No merge candidates" in after.output
+
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            names = {
+                n
+                for (n,) in conn.execute(
+                    "select distinct merchant_name from main_silver.silver_transactions"
+                ).fetchall()
+            }
+        assert name_a not in names
+        assert name_b in names
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_reject_marks_candidate_as_decided(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        name_a, name_b = self._two_merchant_names()
+        self._insert_embedding(name_a, [1.0, 0.0], "e1")
+        self._insert_embedding(name_b, [1.0, 0.0001], "e2")
+
+        reject = runner.invoke(app, ["review", "reject-merge", name_a, name_b])
+        assert reject.exit_code == 0, reject.output
+        assert "Rejected" in reject.output
+
+        after = runner.invoke(app, ["review", "merge-candidates"])
+        assert "No merge candidates" in after.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_unknown_merchant_exits_nonzero(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        result = runner.invoke(app, ["review", "merge", "DOES NOT EXIST", "ALSO NOT REAL"])
+        assert result.exit_code == 1
+        assert "No such merchant" in result.output
+
+
 class TestWatch:
     def test_not_a_directory_exits_nonzero(self, tmp_path):
         result = runner.invoke(
