@@ -13,10 +13,11 @@
 | 2 | **Ingestion** — dlt pipelines (CSV, OFX), bronze Parquet, watch-folder, idempotency | Drop a fake bank export in a folder → rows appear in bronze with provenance; re-drop → no dupes |
 | 3 | **Core cleaning** — dedup, normalization, merchant cleaning, transfer detection | Silver tables with clean transactions; the Venmo +320 / bank −320 pair is linked and excluded from spend; dbt tests pass |
 | 4 | **Categorization** — rules → embeddings → LLM cascade, review queue backend, labels | Every dummy transaction categorized with confidence + provenance (which cascade stage); corrections persist |
-| 5 | **Receipts & line items** — vision LLM parsing, receipt↔charge matching, splits, Amazon ingestion | Photo of a fake grocery receipt → line items attached to the matching card charge → "apples" queryable |
+| 5 | **Line items (order history)** — Amazon/Costco order-history ingestion, order↔charge matching, splits | A fake Amazon order-history export → line items attached to the matching card charge → "apples" queryable |
 | 6 | **Serving** — FastAPI, Streamlit dashboards (sunburst, Sankey), budgets, review-queue UI, config editing | Working local web app over dummy data: drill from total spend to line items; edit a budget; approve a categorization |
 | 7 | **Intelligence** — NL chat, recurring detection, forecasting, trend callouts | Ask "how much did I spend on groceries last month?" in chat and get a correct, mart-backed answer |
 | 8 | **Automation & polish** — Dagster, email ingestion, optional SimpleFIN/Superset, encryption, hardening | End-to-end hands-off: new file → scheduled pipeline → dashboard updates; security pass complete |
+| 9 | **Visual receipt parsing** — vision LLM parsing of photo/PDF receipts, receipt↔charge matching | Photo of a fake grocery receipt → line items attached to the matching card charge → "apples" queryable |
 
 ## Working agreement (applies every phase)
 
@@ -31,6 +32,6 @@
 
 - Dummy data comes first because everything downstream needs fixtures.
 - Cleaning precedes categorization: classifiers should see normalized merchants, not raw descriptors.
-- Receipts precede the UI so the UI can be built against full-granularity data from day one.
+- Order-history line items precede the UI so the UI can be built against full-granularity data from day one; visual (photo/PDF) receipt parsing is deferred past automation since it's an additional ingestion channel onto the same splits model, not a prerequisite for it.
 - Chat comes after marts: the agent is only as good as the gold layer beneath it.
 - Orchestration comes last: CLI-first avoids paying Dagster's ceremony before there is a pipeline worth scheduling.
