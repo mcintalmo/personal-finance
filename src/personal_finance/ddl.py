@@ -90,6 +90,20 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "merchant_merges",
+        """
+        CREATE TABLE IF NOT EXISTS merchant_merges (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            merchant_name TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            similarity DOUBLE CHECK (similarity BETWEEN 0 AND 1),
+            status TEXT NOT NULL CHECK (status IN ('accepted', 'rejected')),
+            note TEXT
+        )
+        """,
+    ),
+    (
         "merchant_embeddings",
         """
         CREATE TABLE IF NOT EXISTS merchant_embeddings (

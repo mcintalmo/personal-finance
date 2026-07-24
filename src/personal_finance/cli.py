@@ -27,7 +27,12 @@ import typer
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
 from personal_finance.embed import EmbeddingClient, compute_missing_embeddings
-from personal_finance.exceptions import ConfigurationError, ExternalServiceError, NotFoundError
+from personal_finance.exceptions import (
+    ConfigurationError,
+    ExternalServiceError,
+    NotFoundError,
+    ValidationError,
+)
 from personal_finance.ingest import (
     IngestOutcome,
     IngestStatus,
@@ -40,6 +45,12 @@ from personal_finance.llm_categorize import (
     compute_missing_llm_categories,
     fetch_category_paths,
 )
+from personal_finance.merchant_merge import (
+    fetch_merge_candidates,
+    fetch_similarity,
+    record_merge_decision,
+)
+from personal_finance.models import MergeStatus
 from personal_finance.review import fetch_review_queue, record_label
 from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
 
@@ -72,7 +83,10 @@ app = typer.Typer(
 
 review_app = typer.Typer(
     name="review",
-    help="List the categorization cascade's ambiguous tail and record human corrections.",
+    help=(
+        "List the categorization cascade's ambiguous tail and record human "
+        "corrections; list/confirm candidate merchant-identity merges."
+    ),
     no_args_is_help=True,
     add_completion=False,
 )
@@ -326,16 +340,7 @@ def enrich(
         raise typer.Exit(code=1)
 
     with duckdb.connect(str(warehouse)) as conn:
-        result = conn.execute(
-            "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
-        ).fetchone()
-        if not result or not result[0]:
-            typer.echo(
-                "silver_transactions has not been built yet — run `pf transform` first.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_silver_transactions_built(conn)
 
         with EmbeddingClient(
             base_url or settings.ollama.base_url, model or settings.ollama.embedding_model
@@ -376,16 +381,7 @@ def classify(
         raise typer.Exit(code=1)
 
     with duckdb.connect(str(warehouse)) as conn:
-        result = conn.execute(
-            "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
-        ).fetchone()
-        if not result or not result[0]:
-            typer.echo(
-                "silver_transactions has not been built yet — run `pf transform` first.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+        _require_silver_transactions_built(conn)
 
         with LlmCategorizeClient(
             base_url or settings.ollama.base_url, model or settings.ollama.chat_model
@@ -399,6 +395,19 @@ def classify(
                 raise typer.Exit(code=1) from exc
 
     typer.echo(f"Classified {count} new merchant(s). Run `pf transform` to apply them.")
+
+
+def _require_silver_transactions_built(conn: duckdb.DuckDBPyConnection) -> None:
+    result = conn.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = 'main_silver' AND table_name = 'silver_transactions'"
+    ).fetchone()
+    if not result or not result[0]:
+        typer.echo(
+            "silver_transactions has not been built yet — run `pf transform` first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 def _require_transform_built(conn: duckdb.DuckDBPyConnection) -> None:
@@ -470,3 +479,117 @@ def review_label(
             raise typer.Exit(code=1) from exc
 
     typer.echo(f"Labeled {transaction_id} -> {category_path}. Run `pf transform` to apply it.")
+
+
+@review_app.command("merge-candidates")
+def review_merge_candidates(
+    model: str | None = typer.Option(
+        None, help="Embedding model (default: Settings.ollama.embedding_model)."
+    ),
+    threshold: float = typer.Option(
+        0.90, min=0.0, max=1.0, help="Minimum cosine similarity to suggest a merge."
+    ),
+    limit: int = typer.Option(20, help="Max candidates to show."),
+) -> None:
+    """List candidate merchant-identity merges (embedding-similarity) — the
+    descriptor tail merchants.yaml aliases weren't written for.
+
+    Requires `pf transform` and `pf enrich` to have run at least once.
+    """
+    warehouse = get_settings().data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_silver_transactions_built(conn)
+        candidates = fetch_merge_candidates(
+            conn,
+            model=model or get_settings().ollama.embedding_model,
+            threshold=threshold,
+            limit=limit,
+        )
+
+    if not candidates:
+        typer.echo("No merge candidates — run `pf enrich` first if you haven't yet.")
+        return
+    for candidate in candidates:
+        typer.echo(
+            f"{candidate.merchant_name!r} -> {candidate.canonical_name!r} "
+            f"(similarity {candidate.similarity:.3f})"
+        )
+    typer.echo(f"{len(candidates)} candidate(s). `pf review merge <name> <canonical>` to accept.")
+
+
+_MERGE_MERCHANT_NAME_ARG = typer.Argument(
+    ..., help="merchant_name from `pf review merge-candidates`."
+)
+_MERGE_MODEL_OPTION = typer.Option(
+    None,
+    help="Embedding model to look up the similarity score for (default: Settings.ollama.embedding_model).",
+)
+_MERGE_NOTE_OPTION = typer.Option(None, help="Optional free-text context for this decision.")
+
+
+@review_app.command("merge")
+def review_merge(
+    merchant_name: str = _MERGE_MERCHANT_NAME_ARG,
+    canonical_name: str = typer.Argument(..., help="The merchant_name to merge it into."),
+    model: str | None = _MERGE_MODEL_OPTION,
+    note: str | None = _MERGE_NOTE_OPTION,
+) -> None:
+    """Confirm a candidate merchant-identity merge.
+
+    Applied after merchant_aliases; the merge outranks nothing but fills a
+    gap regex aliases didn't cover — re-run `pf transform` to apply it.
+    """
+    _record_merge_command(merchant_name, canonical_name, MergeStatus.ACCEPTED, model, note)
+
+
+@review_app.command("reject-merge")
+def review_reject_merge(
+    merchant_name: str = _MERGE_MERCHANT_NAME_ARG,
+    canonical_name: str = typer.Argument(
+        ..., help="The merchant_name it was suggested to merge into."
+    ),
+    model: str | None = _MERGE_MODEL_OPTION,
+    note: str | None = _MERGE_NOTE_OPTION,
+) -> None:
+    """Reject a candidate merchant-identity merge so it stops resurfacing."""
+    _record_merge_command(merchant_name, canonical_name, MergeStatus.REJECTED, model, note)
+
+
+def _record_merge_command(
+    merchant_name: str,
+    canonical_name: str,
+    status: MergeStatus,
+    model: str | None,
+    note: str | None,
+) -> None:
+    warehouse = get_settings().data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_silver_transactions_built(conn)
+        similarity = fetch_similarity(
+            conn,
+            merchant_name,
+            canonical_name,
+            model=model or get_settings().ollama.embedding_model,
+        )
+        try:
+            record_merge_decision(
+                conn, merchant_name, canonical_name, status, similarity=similarity, note=note
+            )
+        except (NotFoundError, ValidationError) as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+    if status is MergeStatus.ACCEPTED:
+        typer.echo(
+            f"Merged {merchant_name!r} -> {canonical_name!r}. Run `pf transform` to apply it."
+        )
+    else:
+        typer.echo(f"Rejected {merchant_name!r} -> {canonical_name!r}.")

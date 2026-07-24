@@ -25,12 +25,33 @@ one phase at a time when the previous phase's demo is complete.
 **Phase 3 merchant follow-ups** (deferred — evaluate existing tooling before hand-rolling more):
 
 - [x] Merchant normalization evaluation + config-driven aliases: see Done below.
-- [ ] Merchant resolution for the outlier tail: fuzzy match / semantic (embedding) search /
-      local-LLM classifier to map descriptors the deterministic cleaner can't resolve to a
-      canonical merchant — feeds the Phase 4 categorizer
+- [x] Merchant resolution for the outlier tail: see Done below.
 
 ## Done
 
+- [x] Merchant resolution for the outlier tail (Phase 3 follow-up): embedding-similarity
+      merge-candidate review queue, human-confirmed only — mis-merging two distinct real
+      merchants silently corrupts spend history in a way a wrong category doesn't, so
+      candidates are never auto-applied. Scoped to embedding similarity only (not a local-LLM
+      pass) — reuses the existing `merchant_embeddings` cache (`pf enrich`) rather than adding
+      a second mechanism. New `personal_finance.merchant_merge` module: `fetch_merge_candidates`
+      self-joins cached embeddings by cosine similarity (default threshold 0.90), direction
+      picked so the more-common (higher transaction-count) spelling is the suggested canonical
+      name; `record_merge_decision` stores an accept/reject verdict in the new `merchant_merges`
+      table (`personal_finance.models.MerchantMerge`) — same "human decision in its own table"
+      shape as `Label` for categorization corrections, not written back into any YAML config. A
+      decided merchant_name never resurfaces as a candidate, but a merchant that's only ever
+      been a merge *target* stays eligible to absorb further distinct variants later. New CLI:
+      `pf review merge-candidates`, `pf review merge <name> <canonical>`,
+      `pf review reject-merge <name> <canonical>`. Applied in `silver_transactions.sql` after
+      `merchant_aliases` resolution (exact-match, not regex; single-hop only — a merge target
+      that's itself later merged elsewhere isn't chased further). **Live-verified end-to-end**
+      against real Ollama (`nomic-embed-text`) on synth data: `pf review merge "SHELL OIL"
+      "CHEVRON"` then `pf transform` collapsed `SHELL OIL` into `CHEVRON` in
+      `silver_transactions.merchant_name`, confirmed absent from `merge-candidates` afterward
+      while `CHEVRON` itself stayed eligible — `src/personal_finance/merchant_merge.py`,
+      `src/personal_finance/models.py`, `src/personal_finance/ddl.py`, `src/personal_finance/cli.py`,
+      `transform/models/silver/silver_transactions.sql` (2026-07-23).
 - [x] Merchant normalization evaluation + config-driven aliases (Phase 3 follow-up). Evaluated
       the two tools TODO.md called out before hand-rolling more: `cleanco` strips legal-entity
       suffixes (Inc/LLC/GmbH) — a different problem from bank-statement descriptor noise, which

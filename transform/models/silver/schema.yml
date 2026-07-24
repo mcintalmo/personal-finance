@@ -43,8 +43,9 @@ models:
       - name: merchant_name
         description: >-
           Cleaned merchant key from the raw descriptor: generic cleanup
-          (normalize_merchant macro) then config-driven alias resolution
-          (merchant_aliases, seeded from merchants.yaml); NULL only when the
+          (normalize_merchant macro), then config-driven alias resolution
+          (merchant_aliases, seeded from merchants.yaml), then human-confirmed
+          embedding-similarity merges (merchant_merges); NULL only when the
           raw description is blank.
         data_tests:
           - relationships:

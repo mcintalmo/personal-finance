@@ -82,6 +82,13 @@ class BudgetPeriod(StrEnum):
     YEARLY = "yearly"
 
 
+class MergeStatus(StrEnum):
+    """A human decision on a candidate merchant-identity merge."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
 class Entity(BaseModel):
     """Base for all persisted entities: client-generated ID + creation timestamp.
 
@@ -210,6 +217,27 @@ class MerchantAlias(Entity):
     pattern: str
     canonical_name: str
     priority: int
+
+
+class MerchantMerge(Entity):
+    """A human decision on a candidate merchant-identity merge.
+
+    Surfaced by :mod:`personal_finance.merchant_merge` (embedding-similarity
+    over cached ``merchant_embeddings``) for descriptor variants the
+    deterministic ``normalize_merchant`` macro and ``merchants.yaml`` aliases
+    couldn't collapse. Unlike ``MerchantAlias`` (config-seeded, full-replace
+    each run), this is a runtime human decision — same pattern as
+    :class:`Label` for categorization corrections: kept in a table read
+    directly by silver_transactions.sql, latest decision per
+    ``merchant_name`` wins if reviewed more than once. ``canonical_name`` is
+    the candidate that was proposed, whether accepted or rejected (kept for
+    audit even on rejection).
+    """
+
+    merchant_name: str
+    canonical_name: str
+    similarity: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: MergeStatus
 
 
 class MerchantEmbedding(Entity):
