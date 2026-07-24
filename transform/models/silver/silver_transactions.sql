@@ -14,24 +14,18 @@ aliases as (
     from {{ source('app', 'merchant_aliases') }}
 ),
 
--- First-match-wins by priority (file order), same pattern as stage 1 of the
+-- First-match-wins by priority (file order), same macro as stage 1 of the
 -- categorization cascade (silver_transaction_categories.sql) — one row per
 -- transaction whose merchant_name matched some alias pattern.
 matched_aliases as (
-    select *
-    from (
-        select
-            base.transaction_id,
-            aliases.canonical_name,
-            row_number() over (
-                partition by base.transaction_id order by aliases.priority
-            ) as rnk
-        from base
-        inner join aliases
-            on base.merchant_name is not null
-            and regexp_matches(base.merchant_name, aliases.pattern)
-    )
-    where rnk = 1
+    select
+        base.transaction_id,
+        aliases.canonical_name
+    from base
+    inner join aliases
+        on base.merchant_name is not null
+        and regexp_matches(base.merchant_name, aliases.pattern)
+    qualify {{ first_match_wins('base.transaction_id', 'aliases.priority') }}
 ),
 
 transfer_legs as (

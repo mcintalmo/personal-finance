@@ -51,7 +51,17 @@ from personal_finance.synth import (
     write_receipts,
     write_scenario,
 )
-from personal_finance.user_config import load_user_config
+from personal_finance.user_config import UserConfig, load_user_config
+
+
+def _load_config_or_exit(config_dir: Path | None) -> UserConfig:
+    """Load user config, exiting with a clean message on ConfigurationError."""
+    try:
+        return load_user_config(config_dir)
+    except ConfigurationError as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
 
 app = typer.Typer(
     name="pf",
@@ -94,11 +104,7 @@ def init_db(
 ) -> None:
     """Create the warehouse schema and seed the category taxonomy, rules, and merchant aliases."""
     warehouse = get_settings().data.warehouse_path
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
     warehouse.parent.mkdir(parents=True, exist_ok=True)
     with duckdb.connect(str(warehouse)) as conn:
         create_schema(conn)
@@ -132,11 +138,7 @@ def transform(
             f"No ingested data under {bronze} — run `pf ingest` (or `pf watch`) first.", err=True
         )
         raise typer.Exit(code=1)
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
     os.environ.setdefault("DATA_WAREHOUSE_PATH", str(warehouse))
     os.environ.setdefault("DATA_BRONZE_PATH", str(bronze))
 
@@ -181,11 +183,7 @@ def ingest(
     Re-ingesting a file (or an overlapping export) is idempotent — rows already
     landed are skipped, so only genuinely-new rows are reported.
     """
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
 
     sources = {s.name: s for s in config.sources}
     if source is not None and source not in sources:
@@ -269,11 +267,7 @@ def watch(
     if not folder.is_dir():
         typer.echo(f"Not a directory: {folder}", err=True)
         raise typer.Exit(code=1)
-    try:
-        config = load_user_config(config_dir)
-    except ConfigurationError as exc:
-        typer.echo(f"Configuration error: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+    config = _load_config_or_exit(config_dir)
 
     sources = {s.name: s for s in config.sources}
     if source is not None and source not in sources:

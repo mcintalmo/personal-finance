@@ -27,15 +27,16 @@
 AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY
 {%- endset -%}
 {%- set known_cities = var('known_cities', []) -%}
-{%- set cities_pattern = known_cities
-    | map('upper')
-    | map('replace', '.', '\\.')
-    | map('replace', '(', '\\(')
-    | map('replace', ')', '\\)')
-    | join('|')
--%}
+{#- known_cities is free-text from the user's places.yaml, not controlled —
+   escape with DuckDB's own regexp_escape (same precedent as
+   silver_transfers.sql's account_name handling) rather than a hand-maintained
+   list of metacharacters, so every RE2 special character is covered. -#}
+{%- set known_cities_sql_items = known_cities | map('replace', "'", "''") | join("', '") -%}
+{%- set cities_pattern_expr -%}
+array_to_string(list_transform(list_value('{{ known_cities_sql_items }}'), x -> regexp_escape(upper(x))), '|')
+{%- endset -%}
 trim(regexp_replace(
-  {%- if cities_pattern %}
+  {%- if known_cities %}
   regexp_replace(
   {%- endif %}
     regexp_replace(
@@ -63,8 +64,8 @@ trim(regexp_replace(
       ),
       '\s+(USA|US|{{ states }})$', ''
     )
-  {%- if cities_pattern %}
-  , '\s+({{ cities_pattern }})$', ''
+  {%- if known_cities %}
+  , '\s+(' || ({{ cities_pattern_expr }}) || ')$', ''
   )
   {%- endif -%}
   ,

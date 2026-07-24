@@ -802,16 +802,21 @@ class TestMerchantAliasResolution:
         assert name == "FOO BAR SPECIAL CO"
 
     def test_is_transfer_and_other_columns_unaffected(self, merchant_alias_warehouse):
-        """The alias-resolution refactor of silver_transactions.sql must not
-        disturb any other column."""
+        """The `base.* exclude (merchant_name)` refactor of silver_transactions.sql
+        must not disturb any other passthrough column, including ones with no
+        other test/schema.yml coverage (external_id, source_file, ingested_at)."""
         with duckdb.connect(str(merchant_alias_warehouse)) as conn:
             rows = conn.execute(
-                "select transaction_id, is_transfer, amount from main_silver.silver_transactions"
+                "select transaction_id, is_transfer, amount, external_id, source_file, "
+                "ingested_at from main_silver.silver_transactions"
             ).fetchall()
         assert rows
-        for _transaction_id, is_transfer, amount in rows:
+        for _transaction_id, is_transfer, amount, external_id, source_file, ingested_at in rows:
             assert is_transfer is False  # no transfer pairs in this tiny fixture
             assert amount < 0
+            assert external_id is None  # chase_checking.csv fixture has no FITID column
+            assert source_file.endswith("chase_checking.csv")
+            assert ingested_at is not None
 
 
 class TestSilverTransfers:
