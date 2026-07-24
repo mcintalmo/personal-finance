@@ -45,7 +45,11 @@ from personal_finance.llm_categorize import (
     compute_missing_llm_categories,
     fetch_category_paths,
 )
-from personal_finance.merchant_merge import fetch_merge_candidates, record_merge_decision
+from personal_finance.merchant_merge import (
+    fetch_merge_candidates,
+    fetch_similarity,
+    record_merge_decision,
+)
 from personal_finance.models import MergeStatus
 from personal_finance.review import fetch_review_queue, record_label
 from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
@@ -517,38 +521,50 @@ def review_merge_candidates(
     typer.echo(f"{len(candidates)} candidate(s). `pf review merge <name> <canonical>` to accept.")
 
 
+_MERGE_MERCHANT_NAME_ARG = typer.Argument(
+    ..., help="merchant_name from `pf review merge-candidates`."
+)
+_MERGE_MODEL_OPTION = typer.Option(
+    None,
+    help="Embedding model to look up the similarity score for (default: Settings.ollama.embedding_model).",
+)
+_MERGE_NOTE_OPTION = typer.Option(None, help="Optional free-text context for this decision.")
+
+
 @review_app.command("merge")
 def review_merge(
-    merchant_name: str = typer.Argument(
-        ..., help="merchant_name from `pf review merge-candidates`."
-    ),
+    merchant_name: str = _MERGE_MERCHANT_NAME_ARG,
     canonical_name: str = typer.Argument(..., help="The merchant_name to merge it into."),
-    note: str | None = typer.Option(None, help="Optional free-text context for this decision."),
+    model: str | None = _MERGE_MODEL_OPTION,
+    note: str | None = _MERGE_NOTE_OPTION,
 ) -> None:
     """Confirm a candidate merchant-identity merge.
 
     Applied after merchant_aliases; the merge outranks nothing but fills a
     gap regex aliases didn't cover — re-run `pf transform` to apply it.
     """
-    _record_merge_command(merchant_name, canonical_name, MergeStatus.ACCEPTED, note)
+    _record_merge_command(merchant_name, canonical_name, MergeStatus.ACCEPTED, model, note)
 
 
 @review_app.command("reject-merge")
 def review_reject_merge(
-    merchant_name: str = typer.Argument(
-        ..., help="merchant_name from `pf review merge-candidates`."
-    ),
+    merchant_name: str = _MERGE_MERCHANT_NAME_ARG,
     canonical_name: str = typer.Argument(
         ..., help="The merchant_name it was suggested to merge into."
     ),
-    note: str | None = typer.Option(None, help="Optional free-text context for this decision."),
+    model: str | None = _MERGE_MODEL_OPTION,
+    note: str | None = _MERGE_NOTE_OPTION,
 ) -> None:
     """Reject a candidate merchant-identity merge so it stops resurfacing."""
-    _record_merge_command(merchant_name, canonical_name, MergeStatus.REJECTED, note)
+    _record_merge_command(merchant_name, canonical_name, MergeStatus.REJECTED, model, note)
 
 
 def _record_merge_command(
-    merchant_name: str, canonical_name: str, status: MergeStatus, note: str | None
+    merchant_name: str,
+    canonical_name: str,
+    status: MergeStatus,
+    model: str | None,
+    note: str | None,
 ) -> None:
     warehouse = get_settings().data.warehouse_path
     if not warehouse.exists():
@@ -557,8 +573,16 @@ def _record_merge_command(
 
     with duckdb.connect(str(warehouse)) as conn:
         _require_silver_transactions_built(conn)
+        similarity = fetch_similarity(
+            conn,
+            merchant_name,
+            canonical_name,
+            model=model or get_settings().ollama.embedding_model,
+        )
         try:
-            record_merge_decision(conn, merchant_name, canonical_name, status, note=note)
+            record_merge_decision(
+                conn, merchant_name, canonical_name, status, similarity=similarity, note=note
+            )
         except (NotFoundError, ValidationError) as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc

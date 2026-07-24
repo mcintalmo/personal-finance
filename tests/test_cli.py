@@ -450,6 +450,13 @@ class TestReviewMerge:
         assert merge.exit_code == 0, merge.output
         assert "Merged" in merge.output
 
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            (similarity,) = conn.execute(
+                "select similarity from merchant_merges where merchant_name = $name",
+                {"name": name_a},
+            ).fetchone()
+        assert similarity is not None and similarity > 0.9
+
         after = runner.invoke(app, ["review", "merge-candidates"])
         assert after.exit_code == 0, after.output
         assert "No merge candidates" in after.output

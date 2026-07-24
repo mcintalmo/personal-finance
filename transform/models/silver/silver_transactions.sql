@@ -39,29 +39,21 @@ aliased as (
 ),
 
 -- Human-confirmed merges (pf review merge-candidates / merge), keyed by
--- merchant_name (exact match, not regex) — latest decision wins if a
--- merchant_name was reviewed more than once. Single-hop only: a merge
--- target that is itself later merged elsewhere is not chased further.
+-- merchant_name (exact match, not regex). Ranking happens over EVERY
+-- decision (accepted or rejected) ordered by recency — not just the
+-- accepted ones — so a later reject overrides a stale earlier accept
+-- instead of being filtered out before it ever gets to compete; only once
+-- the single latest decision per merchant_name is picked do we keep it if
+-- it was an accept. Single-hop only: a merge target that is itself later
+-- merged elsewhere is not chased further.
 merges as (
     select merchant_name, canonical_name
     from (
-        select
-            *,
-            row_number() over (
-                partition by merchant_name order by created_at desc
-            ) as rnk
+        select *
         from {{ source('app', 'merchant_merges') }}
-        where status = 'accepted'
+        qualify {{ first_match_wins('merchant_name', 'created_at desc') }}
     )
-    where rnk = 1
-),
-
-resolved as (
-    select
-        aliased.transaction_id,
-        coalesce(merges.canonical_name, aliased.merchant_name) as merchant_name
-    from aliased
-    left join merges on merges.merchant_name = aliased.merchant_name
+    where status = 'accepted'
 ),
 
 transfer_legs as (
@@ -72,8 +64,9 @@ transfer_legs as (
 
 select
     base.* exclude (merchant_name),
-    resolved.merchant_name,
+    coalesce(merges.canonical_name, aliased.merchant_name) as merchant_name,
     legs.transaction_id is not null as is_transfer
 from base
-left join resolved using (transaction_id)
+left join aliased using (transaction_id)
+left join merges on merges.merchant_name = aliased.merchant_name
 left join transfer_legs as legs using (transaction_id)

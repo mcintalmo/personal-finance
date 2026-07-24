@@ -5,7 +5,11 @@ import pytest
 
 from personal_finance.ddl import create_schema
 from personal_finance.exceptions import NotFoundError, ValidationError
-from personal_finance.merchant_merge import fetch_merge_candidates, record_merge_decision
+from personal_finance.merchant_merge import (
+    fetch_merge_candidates,
+    fetch_similarity,
+    record_merge_decision,
+)
 from personal_finance.models import MergeStatus
 
 _MODEL = "nomic-embed-text"
@@ -34,6 +38,21 @@ def _insert_embedding(conn, merchant_name, vector, model=_MODEL):
             "merchant_name": merchant_name,
             "model": model,
             "embedding": vector,
+        },
+    )
+
+
+def _insert_llm_category(conn, merchant_name, category_id, confidence=0.9, model=_MODEL):
+    conn.execute(
+        "INSERT INTO merchant_llm_categories "
+        "(id, created_at, merchant_name, model, category_id, confidence) "
+        "VALUES ($id, now(), $merchant_name, $model, $category_id, $confidence)",
+        {
+            "id": f"{merchant_name}-{model}-llm",
+            "merchant_name": merchant_name,
+            "model": model,
+            "category_id": category_id,
+            "confidence": confidence,
         },
     )
 
@@ -174,3 +193,96 @@ class TestRecordMergeDecision:
             "SELECT count(*) FROM merchant_merges WHERE merchant_name = 'TARGET T-1234'"
         ).fetchone()
         assert count == 2
+
+    def test_reverse_merge_after_accept_raises_cycle_error(self, conn):
+        """Accepting SHELL OIL -> CHEVRON then CHEVRON -> SHELL OIL would make
+        the single-hop `merges` resolution swap both identities instead of
+        merging them — must be rejected outright."""
+        _insert_txns(conn, "SHELL OIL", 1)
+        _insert_txns(conn, "CHEVRON", 3)
+        record_merge_decision(conn, "SHELL OIL", "CHEVRON", MergeStatus.ACCEPTED)
+
+        with pytest.raises(ValidationError, match="two-way cycle"):
+            record_merge_decision(conn, "CHEVRON", "SHELL OIL", MergeStatus.ACCEPTED)
+
+    def test_reverse_merge_is_allowed_once_the_original_is_rejected(self, conn):
+        _insert_txns(conn, "SHELL OIL", 1)
+        _insert_txns(conn, "CHEVRON", 3)
+        record_merge_decision(conn, "SHELL OIL", "CHEVRON", MergeStatus.ACCEPTED)
+        record_merge_decision(conn, "SHELL OIL", "CHEVRON", MergeStatus.REJECTED)
+
+        merge = record_merge_decision(conn, "CHEVRON", "SHELL OIL", MergeStatus.ACCEPTED)
+
+        assert merge.status == MergeStatus.ACCEPTED
+
+    def test_rejecting_a_never_accepted_pair_does_not_raise_cycle_error(self, conn):
+        _insert_txns(conn, "TARGET T-1234", 1)
+        _insert_txns(conn, "TARGET 0099", 3)
+
+        merge = record_merge_decision(conn, "TARGET T-1234", "TARGET 0099", MergeStatus.REJECTED)
+
+        assert merge.status == MergeStatus.REJECTED
+
+    def test_accept_carries_forward_cached_embedding_and_llm_category(self, conn):
+        _insert_txns(conn, "TARGET T-1234", 1)
+        _insert_txns(conn, "TARGET 0099", 3)
+        _insert_embedding(conn, "TARGET T-1234", [1.0, 0.0])
+        _insert_llm_category(conn, "TARGET T-1234", "groceries-id", confidence=0.87)
+
+        record_merge_decision(conn, "TARGET T-1234", "TARGET 0099", MergeStatus.ACCEPTED)
+
+        (embedding,) = conn.execute(
+            "SELECT embedding FROM merchant_embeddings WHERE merchant_name = 'TARGET 0099'"
+        ).fetchone()
+        assert embedding == [1.0, 0.0]
+        (category_id, confidence) = conn.execute(
+            "SELECT category_id, confidence FROM merchant_llm_categories "
+            "WHERE merchant_name = 'TARGET 0099'"
+        ).fetchone()
+        assert (category_id, confidence) == ("groceries-id", 0.87)
+
+    def test_carry_forward_does_not_overwrite_canonical_names_own_cache(self, conn):
+        _insert_txns(conn, "TARGET T-1234", 1)
+        _insert_txns(conn, "TARGET 0099", 3)
+        _insert_embedding(conn, "TARGET T-1234", [1.0, 0.0])
+        _insert_embedding(conn, "TARGET 0099", [0.0, 1.0])
+
+        record_merge_decision(conn, "TARGET T-1234", "TARGET 0099", MergeStatus.ACCEPTED)
+
+        (embedding,) = conn.execute(
+            "SELECT embedding FROM merchant_embeddings WHERE merchant_name = 'TARGET 0099'"
+        ).fetchone()
+        assert embedding == [0.0, 1.0]  # canonical's own embedding, not overwritten
+
+    def test_reject_does_not_carry_forward_cache(self, conn):
+        _insert_txns(conn, "TARGET T-1234", 1)
+        _insert_txns(conn, "TARGET 0099", 3)
+        _insert_embedding(conn, "TARGET T-1234", [1.0, 0.0])
+
+        record_merge_decision(conn, "TARGET T-1234", "TARGET 0099", MergeStatus.REJECTED)
+
+        (count,) = conn.execute(
+            "SELECT count(*) FROM merchant_embeddings WHERE merchant_name = 'TARGET 0099'"
+        ).fetchone()
+        assert count == 0
+
+
+class TestFetchSimilarity:
+    def test_returns_cosine_similarity_for_a_cached_pair(self, conn):
+        _insert_embedding(conn, "TARGET T-1234", [1.0, 0.0])
+        _insert_embedding(conn, "TARGET 0099", [1.0, 0.0])
+
+        similarity = fetch_similarity(conn, "TARGET T-1234", "TARGET 0099", model=_MODEL)
+
+        assert similarity == pytest.approx(1.0)
+
+    def test_none_when_either_embedding_is_missing(self, conn):
+        _insert_embedding(conn, "TARGET T-1234", [1.0, 0.0])
+
+        assert fetch_similarity(conn, "TARGET T-1234", "TARGET 0099", model=_MODEL) is None
+
+    def test_none_for_a_different_model(self, conn):
+        _insert_embedding(conn, "TARGET T-1234", [1.0, 0.0], model="other-model")
+        _insert_embedding(conn, "TARGET 0099", [1.0, 0.0], model="other-model")
+
+        assert fetch_similarity(conn, "TARGET T-1234", "TARGET 0099", model=_MODEL) is None
