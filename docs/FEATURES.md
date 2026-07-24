@@ -31,10 +31,10 @@
 - [x] Human review queue for low-confidence assignments; corrections stored as labels and fed back to the classifier
 - [x] Category rollups through the hierarchy at every level
 
-## 5. Receipts & line items
-- [ ] Receipt upload (photo/PDF) → vision LLM via Ollama → structured JSON (merchant, date, total, line items)
-- [ ] Receipt ↔ transaction matching; transaction decomposition into splits
-- [ ] Amazon order-history CSV ingestion and order ↔ charge matching
+## 5. Line items (order history)
+- [ ] Amazon order-history export ingestion (CSV/data-request) and order ↔ charge matching
+- [ ] Costco (and similar itemized warehouse-club order history) ingestion where available
+- [ ] Transaction decomposition into splits, keyed off matched order line items
 - [ ] Line-item categorization through the same cascade (enables "spend on apples this year")
 
 ## 6. Serving & visualization
@@ -60,3 +60,7 @@
 - [ ] DuckDB at-rest encryption; security hardening pass
 - [ ] AI-generated visuals in chat (stretch)
 - [ ] Real-data onboarding guide (local-only, never in repo)
+
+## 9. Visual receipt parsing
+- [ ] Receipt upload (photo/PDF) → vision LLM via Ollama → structured JSON (merchant, date, total, line items)
+- [ ] Receipt ↔ transaction matching for photo/PDF-sourced receipts, decomposed into splits like Phase 5
