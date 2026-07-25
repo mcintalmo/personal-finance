@@ -102,6 +102,26 @@ Phase 6 demo):
       Also fixed a recurring supply-chain issue: `uv add` had silently walked gitpython back to
       3.1.52 (five advisories) for the third time this session; `[tool.uv]`
       constraint-dependencies + exclude-newer-package now floor it durably.
+      **A five-agent pre-merge review found eight real correctness bugs that the unit tests, the
+      dbt data tests and CI had all passed over** — worth recording because several share one
+      root cause. `_theta` was handed a plain list where statsmodels needs an array; the bare
+      `except Exception` in `_safe_forecast` swallowed it, so Theta silently dropped out of every
+      forecast ever produced. The existing test asserted Theta was *listed*, never that it *ran*.
+      The same suppression habit hid an `invalid value encountered in divide` from ETS behind a
+      blanket `warnings.simplefilter("ignore")`. Lesson carried forward: any swallow-path needs a
+      test proving it is not being taken. Also fixed: `_project_committed` averaged committed
+      totals instead of stepping each group's cadence, so an annual premium was subtracted from
+      the modelled series and never projected back (money silently vanished) while a quarterly
+      charge was projected into all three months; near-linear histories published multi-month
+      extrapolations as zero-width "80%" intervals; the conformal quantile used `round()` where
+      nearest-rank needs `ceil()`; negative forecasts inverted the interval bounds; and an
+      unconditional `DELETE` outside a transaction let a transient empty upstream destroy good
+      forecasts while exiting 0. Invariants are now enforced by a pydantic validator at
+      construction rather than only by a dbt test after the rows are written.
+      **Known limitation, deliberately left:** income never gets a committed component, because
+      `gold_recurring_expenses` detects outflows only — a salary is the most predictable flow in
+      a personal ledger and would benefit from the same decomposition if recurring detection is
+      extended to inflows.
 
 - [x] Phase 7 stage 1 — Recurring-expense detection: new `gold_recurring_expenses` dbt model
       groups outflows by `(merchant_name, amount)`, requires >= 3 occurrences, and classifies the
