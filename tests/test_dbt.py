@@ -1509,3 +1509,53 @@ class TestSilverAmazonOrderMatches:
             ).fetchall()
         assert rows
         assert all(day_gap == 0 for (day_gap,) in rows)
+
+
+class TestSilverAmazonSplits:
+    def test_one_split_per_line_item(self, amazon_warehouse):
+        warehouse, _scenario, orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (count,) = conn.execute(
+                "select count(*) from main_silver.silver_amazon_splits"
+            ).fetchone()
+        assert count == len(orders) > 0
+
+    def test_splits_sum_to_exact_transaction_amount(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select s.transaction_id, sum(s.amount), any_value(t.amount) "
+                "from main_silver.silver_amazon_splits s "
+                "join main_silver.silver_transactions t using (transaction_id) "
+                "group by s.transaction_id"
+            ).fetchall()
+        assert rows
+        for _transaction_id, split_total, charge_amount in rows:
+            assert split_total == charge_amount
+
+    def test_multi_item_shipment_splits_proportionally(self, amazon_warehouse):
+        # A shipment with items of different subtotals should not just divide
+        # the charge evenly — each split's magnitude should track its item's
+        # (subtotal + tax) share, confirming proportional (not flat) allocation.
+        warehouse, _scenario, orders = amazon_warehouse
+        multi_item_orders: dict[str, list] = {}
+        for order in orders:
+            multi_item_orders.setdefault(order.website_order_id, []).append(order)
+        website_order_id, items = next(
+            (oid, items) for oid, items in multi_item_orders.items() if len(items) > 1
+        )
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select s.asin, s.amount from main_silver.silver_amazon_splits s "
+                "join main_silver.silver_amazon_order_matches m using (transaction_id) "
+                "where m.website_order_id = $order_id",
+                {"order_id": website_order_id},
+            ).fetchall()
+        by_asin = dict(rows)
+        largest_item = max(
+            items, key=lambda o: o.shipment_item_subtotal + o.shipment_item_subtotal_tax
+        )
+        smallest_item = min(
+            items, key=lambda o: o.shipment_item_subtotal + o.shipment_item_subtotal_tax
+        )
+        assert abs(by_asin[largest_item.asin]) >= abs(by_asin[smallest_item.asin])

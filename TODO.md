@@ -23,7 +23,7 @@ receipts) stays in Phase 9 until vision-LLM parsing exists.
 
 - [x] Amazon order-history CSV ingestion: see Done below.
 - [x] Amazon order ↔ card-charge matching: see Done below.
-- [ ] Transaction decomposition into splits, keyed off matched order line items
+- [x] Transaction decomposition into splits, keyed off matched order line items: see Done below.
 - [ ] Line-item categorization through the same cascade (enables "spend on apples this year")
 
 ## Backlog (later phases)
@@ -89,6 +89,20 @@ one phase at a time when the previous phase's demo is complete.
       ingested `chase_checking` + `amex` (the credit card Amazon charges post to) + `amazon`, ran
       `pf transform` (129/129 checks green), confirmed all 5 generated shipments matched 1:1 to
       their real card charges with `day_gap = 0` (2026-07-24).
+- [x] Transaction decomposition into splits (Phase 5): new `silver_amazon_splits` model —
+      docs/ARCHITECTURE.md's `transaction_splits` concept (a receipt/order decomposes one
+      transaction into N splits), keyed off `silver_amazon_order_matches` (only matched shipments
+      decompose; an unmatched shipment has no charge to attach to, and the "unsplit transactions
+      get an implicit split" union-everything view is a gold-layer concern, not built yet). Amazon's
+      per-item subtotal + tax doesn't naturally sum to the charge (shipping/discounts fold in, and
+      Amazon rounds each item independently), so each item's split is allocated proportionally to
+      its (subtotal + tax) share of the transaction amount, with the last item (by `split_id`, a
+      stable tiebreak) absorbing the rounding remainder — this makes splits a true decomposition
+      (`sum(amount) = transaction amount` exactly, not just approximately), enforced by new singular
+      test `assert_amazon_splits_sum_to_transaction_amount`. New `schema.yml` entry with
+      `not_null`/`unique`/`relationships` tests. **Live-verified end-to-end**: `pf transform`
+      (138/138 checks green), confirmed every shipment's splits sum to exactly its transaction's
+      amount to the cent (e.g. a 3-item shipment's `-18.27 + -37.03 + -20.04 = -75.34`) (2026-07-25).
 - [x] Merchant resolution for the outlier tail (Phase 3 follow-up): embedding-similarity
       merge-candidate review queue, human-confirmed only — mis-merging two distinct real
       merchants silently corrupts spend history in a way a wrong category doesn't, so
