@@ -32,6 +32,19 @@ vars:
   # empty by default so a config-free build is a no-op here, same as every
   # other cascade stage.
   known_cities: []
+  # Recurring-expense detection (gold_recurring_expenses): the average gap
+  # (in days) between same-merchant, same-amount charges must fall in one of
+  # these [min, max] ranges to be bucketed into that cadence; outside all of
+  # them, the group isn't classified as recurring at all.
+  recurring_weekly_gap_days: [5, 9]
+  recurring_monthly_gap_days: [25, 35]
+  recurring_quarterly_gap_days: [80, 100]
+  recurring_yearly_gap_days: [350, 380]
+  # How tight gap-to-gap regularity must be (as a fraction of the average gap)
+  # for a repeating charge to count as "regular" rather than coincidental —
+  # a merchant charged the same amount twice at random intervals isn't
+  # "recurring".
+  recurring_regularity_threshold: 0.25
 
 clean-targets:
   - target

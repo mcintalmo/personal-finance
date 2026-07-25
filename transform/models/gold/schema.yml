@@ -124,6 +124,41 @@ models:
       - name: actual_outflow
         data_tests: [not_null]
 
+  - name: gold_recurring_expenses
+    description: >-
+      Heuristically detected recurring charges: one row per (merchant_name,
+      amount) pair of outflows that repeat at a regular weekly/monthly/
+      quarterly/yearly cadence (rent, subscriptions, ...). A merchant charged
+      the same amount only once or twice, or at irregular intervals, has no
+      row here. Phase 7 (Intelligence).
+    columns:
+      - name: recurring_expense_id
+        data_tests: [unique, not_null]
+      - name: merchant_name
+        data_tests: [not_null]
+      - name: amount
+        description: Positive charge magnitude (outflow), matching gold_monthly_flow's sign convention.
+        data_tests: [not_null]
+      - name: cadence
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [weekly, monthly, quarterly, yearly]
+      - name: occurrence_count
+        description: Number of charges observed; always >= 3 by construction.
+        data_tests: [not_null]
+      - name: first_seen_on
+        data_tests: [not_null]
+      - name: last_seen_on
+        data_tests: [not_null]
+      - name: avg_gap_days
+        description: Average days between consecutive charges; the value cadence is bucketed from.
+        data_tests: [not_null]
+      - name: gap_days_stddev
+        description: Population stddev of the gaps; always <= avg_gap_days * recurring_regularity_threshold.
+        data_tests: [not_null]
+
   - name: gold_sankey_flow
     description: >-
       Money-flow edges (source, target, value) for the Phase 6 Sankey
