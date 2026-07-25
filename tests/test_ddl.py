@@ -17,6 +17,8 @@ from personal_finance.models import (
     Document,
     DocumentType,
     EntityKind,
+    Forecast,
+    ForecastSeriesKind,
     Label,
     Link,
     LinkType,
@@ -31,6 +33,7 @@ from personal_finance.models import (
     Rule,
     Transaction,
     TransactionSplit,
+    TrendDirection,
 )
 
 EXPECTED_TABLES = {
@@ -50,6 +53,7 @@ EXPECTED_TABLES = {
     "links",
     "budgets",
     "labels",
+    "forecasts",
 }
 
 
@@ -162,6 +166,24 @@ class TestRoundTrip:
             starts_on=date(2026, 1, 1),
         )
         label = Label(subject_kind=EntityKind.SPLIT, subject_id=split.id, category_id=root.id)
+        forecast = Forecast(
+            series_kind=ForecastSeriesKind.BUDGET_CATEGORY,
+            series_key=budget.id,
+            series_label="Groceries",
+            category_id=groceries.id,
+            period_start=date(2026, 8, 1),
+            horizon=1,
+            committed_amount=Decimal("0.00"),
+            variable_amount=Decimal("512.30"),
+            predicted_amount=Decimal("512.30"),
+            lower_bound=Decimal("410.00"),
+            upper_bound=Decimal("614.60"),
+            interval_level=80,
+            model_name="theta",
+            mase=0.82,
+            trend=TrendDirection.RISING,
+            trained_through=date(2026, 7, 1),
+        )
 
         insert(conn, "accounts", account)
         insert(conn, "merchants", merchant)
@@ -180,6 +202,7 @@ class TestRoundTrip:
         insert(conn, "links", link)
         insert(conn, "budgets", budget)
         insert(conn, "labels", label)
+        insert(conn, "forecasts", forecast)
 
         for table in EXPECTED_TABLES:
             count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]

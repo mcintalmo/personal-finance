@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
+    "statsmodels>=0.14.6",
     "streamlit>=1.59.2",
     "typer>=0.26.8",
     "uvicorn[standard]>=0.51.0",
@@ -62,6 +63,19 @@ package = true   # treat as an installable package (src layout)
 # (UnserializableField at import time). mashumaro >=3.22 fixes 3.14 support
 # and dbt works with it; drop this override once dbt raises its pin.
 override-dependencies = ["mashumaro[msgpack]>=3.22"]
+# gitpython arrives transitively (via streamlit). Nothing upstream floors it, so
+# every re-resolution triggered by `uv add`/`uv lock --upgrade-package` silently
+# walks it back to 3.1.52, which carries five known advisories — the worst
+# (GHSA-94p4-4cq8-9g67, env-var exfiltration via Repo.create_remote) fixed only
+# in 3.1.55. Two settings are needed together, and neither works alone:
+#   * constraint-dependencies floors the version;
+#   * exclude-newer-package exempts gitpython from the global 7-day release
+#     quarantine (~/.config/uv/uv.toml), which would otherwise hide the fix
+#     because it is newer than the window. A one-shot `--exclude-newer-package`
+#     flag does NOT survive: uv.lock's [options.exclude-newer-package] table is
+#     overwritten, not merged, by the next such flag.
+constraint-dependencies = ["gitpython>=3.1.55"]
+exclude-newer-package = { gitpython = "2026-07-25T00:00:00Z" }
 
 # ── Ruff ────────────────────────────────────────────────────
 # Replaces: black, isort, flake8, pyupgrade, and most plugins.

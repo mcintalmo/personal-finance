@@ -40,6 +40,13 @@ from personal_finance.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from personal_finance.forecast import (
+    DEFAULT_HORIZON,
+    DEFAULT_INTERVAL_LEVEL,
+    MAX_HORIZON,
+    MIN_HISTORY_MONTHS,
+    compute_forecasts,
+)
 from personal_finance.ingest import (
     IngestOutcome,
     IngestStatus,
@@ -432,6 +439,48 @@ def enrich(
     typer.echo(
         f"Embedded {merchant_count} new merchant(s), {product_count} new product(s). "
         "Run `pf transform` to apply them."
+    )
+
+
+@app.command()
+def forecast(
+    horizon: int = typer.Option(
+        DEFAULT_HORIZON, min=1, max=MAX_HORIZON, help="Months ahead to forecast."
+    ),
+    interval: int = typer.Option(
+        DEFAULT_INTERVAL_LEVEL, min=1, max=99, help="Prediction-interval coverage, in percent."
+    ),
+) -> None:
+    """Forecast spend and income for the next few months.
+
+    Forecasts total income, total spend, and each configured budget's category
+    subtree. Each month is split into its committed part (recurring charges
+    projected forward from `gold_recurring_expenses`) and its variable part
+    (statistically modelled) — only the variable part carries uncertainty.
+
+    Requires `pf transform` to have run at least once. Series with fewer than
+    six complete months of history are skipped rather than guessed at. Re-run
+    `pf transform` afterward to publish the results as `gold_forecasts`.
+    """
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_transform_built(conn)
+        written = compute_forecasts(conn, horizon=horizon, interval_level=interval)
+
+    if not written:
+        typer.echo(
+            f"No forecasts written — every series has fewer than {MIN_HISTORY_MONTHS} "
+            "complete months of history. Ingest more data and re-run."
+        )
+        return
+    typer.echo(
+        f"Wrote {written} forecast row(s) at {interval}% interval. "
+        "Run `pf transform` to publish gold_forecasts."
     )
 
 

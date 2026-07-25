@@ -33,7 +33,7 @@ in Phase 9 until vision-LLM parsing exists.
 
 - [x] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence): see Done below.
 - [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
-- [ ] Forecasting of spend/income (statsforecast)
+- [x] Forecasting of spend/income (statsmodels): see Done below.
 - [ ] Trend and anomaly callouts on the dashboard
 
 ## Backlog (later phases)
@@ -76,6 +76,32 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stage 2 — Spend/income forecasting: new `personal_finance.forecast` (`pf forecast`)
+      + `gold_forecasts`. Forecasts total income, total spend, and every configured budget's
+      category subtree. Each month is **decomposed**: the committed part (recurring charges from
+      `gold_recurring_expenses`) is projected forward deterministically, and only the variable
+      remainder is statistically modelled — so the prediction interval covers the variable
+      component alone. A 100%-subscription category therefore gets a zero-width band while a
+      discretionary one gets an honest wide one (verified live: the Streaming budget forecasts
+      $27.48 committed / $0.00 variable / lower == upper).
+      **Library choice changed from the planned statsforecast to statsmodels**: statsforecast
+      caps `pandas<3.0.0` (as does its utilsforecast dep) and the user wants to stay on pandas 3,
+      and — more decisively — its conformal intervals need >= 7 samples and `AutoETS` >= 16, so it
+      fails in exactly this project's 6-24-month regime. statsmodels has no pandas cap and fits
+      at n=6. Candidate panel (naive / mean-of-3 / Theta / ETS) is gated by history length and
+      selected per-series by rolling-origin MASE; intervals are conformal quantiles of the
+      backtest residuals, widened by sqrt(h). Trend uses a Theil-Sen slope, not OLS — a test
+      caught that a single expensive month tilts an OLS line enough to report FALLING, which is
+      exactly the "up-up-up vs. one pricey month" distinction this is meant to answer.
+      Deliberate guards: the partial current month is excluded from training (otherwise every
+      model forecasts a spurious decline), series under six complete months are skipped rather
+      than guessed at, and the history window starts at the ledger's first month — live
+      verification caught that a fixed 36-month lookback padded the front with 30 fake zero
+      months and corrupted MASE and the trend slope.
+      Also fixed a recurring supply-chain issue: `uv add` had silently walked gitpython back to
+      3.1.52 (five advisories) for the third time this session; `[tool.uv]`
+      constraint-dependencies + exclude-newer-package now floor it durably.
 
 - [x] Phase 7 stage 1 — Recurring-expense detection: new `gold_recurring_expenses` dbt model
       groups outflows by `(merchant_name, amount)`, requires >= 3 occurrences, and classifies the

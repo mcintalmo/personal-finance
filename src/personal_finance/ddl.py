@@ -162,6 +162,33 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "forecasts",
+        """
+        CREATE TABLE IF NOT EXISTS forecasts (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            series_kind TEXT NOT NULL,
+            series_key TEXT NOT NULL,
+            series_label TEXT NOT NULL,
+            category_id TEXT,
+            period_start DATE NOT NULL,
+            horizon INTEGER NOT NULL CHECK (horizon >= 1),
+            committed_amount DECIMAL(18, 2) NOT NULL,
+            variable_amount DECIMAL(18, 2) NOT NULL,
+            predicted_amount DECIMAL(18, 2) NOT NULL,
+            lower_bound DECIMAL(18, 2) NOT NULL,
+            upper_bound DECIMAL(18, 2) NOT NULL,
+            interval_level INTEGER NOT NULL CHECK (interval_level BETWEEN 1 AND 99),
+            model_name TEXT NOT NULL,
+            mase DOUBLE,
+            trend TEXT NOT NULL,
+            trained_through DATE NOT NULL,
+            note TEXT,
+            UNIQUE (series_key, period_start)
+        )
+        """,
+    ),
+    (
         "transactions",
         """
         CREATE TABLE IF NOT EXISTS transactions (

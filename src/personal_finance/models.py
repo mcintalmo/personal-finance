@@ -82,6 +82,26 @@ class BudgetPeriod(StrEnum):
     YEARLY = "yearly"
 
 
+class ForecastSeriesKind(StrEnum):
+    """Which kind of series a forecast row belongs to."""
+
+    TOTAL_INFLOW = "total_inflow"
+    TOTAL_OUTFLOW = "total_outflow"
+    BUDGET_CATEGORY = "budget_category"
+
+
+class TrendDirection(StrEnum):
+    """Direction of the fitted trend over the observed history.
+
+    Answers "is this climbing month over month, or was last month just
+    expensive?" — a level shift shows up as FLAT, a sustained climb as RISING.
+    """
+
+    RISING = "rising"
+    FALLING = "falling"
+    FLAT = "flat"
+
+
 class MergeStatus(StrEnum):
     """A human decision on a candidate merchant-identity merge."""
 
@@ -294,3 +314,37 @@ class ProductLlmCategory(Entity):
     model: str
     category_id: str
     confidence: float
+
+
+class Forecast(Entity):
+    """One forecast month for one series, decomposed into its two components.
+
+    ``predicted_amount`` is always ``committed_amount + variable_amount``:
+
+    * **committed** — recurring charges due that month (rent, subscriptions),
+      projected forward deterministically from ``gold_recurring_expenses`` on
+      each group's own observed cadence. Known, not estimated.
+    * **variable** — everything else, from a statistical model fit to the
+      history with the committed component removed.
+
+    The interval covers the **variable component only**, so a category that is
+    mostly subscriptions gets a tight band and a mostly-discretionary one gets
+    an honest wide band. See :mod:`personal_finance.forecast`.
+    """
+
+    series_kind: ForecastSeriesKind
+    series_key: str  # 'total_inflow' | 'total_outflow' | a budget id
+    series_label: str
+    category_id: str | None = None  # set for BUDGET_CATEGORY series
+    period_start: date  # first day of the forecast month
+    horizon: int = Field(ge=1)  # months ahead of trained_through
+    committed_amount: Decimal
+    variable_amount: Decimal
+    predicted_amount: Decimal
+    lower_bound: Decimal
+    upper_bound: Decimal
+    interval_level: int = Field(ge=1, le=99)
+    model_name: str
+    mase: float | None = None  # backtest error vs. naive; < 1 beats naive
+    trend: TrendDirection
+    trained_through: date  # last COMPLETE month used to fit

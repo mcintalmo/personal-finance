@@ -159,6 +159,70 @@ models:
         description: Population stddev of the gaps; always <= avg_gap_days * recurring_regularity_threshold.
         data_tests: [not_null]
 
+  - name: gold_forecasts
+    description: >-
+      Spend/income forecasts (Phase 7), one row per (series, forecast month).
+      predicted_amount = committed_amount + variable_amount; the interval
+      covers the variable component only, since committed (recurring) spend is
+      known rather than estimated. Empty until `pf forecast` has run, and
+      series with under six complete months of history are deliberately absent
+      rather than guessed at.
+    columns:
+      - name: forecast_id
+        data_tests: [unique, not_null]
+      - name: series_kind
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [total_inflow, total_outflow, budget_category]
+      - name: series_key
+        data_tests: [not_null]
+      - name: series_label
+        data_tests: [not_null]
+      - name: category_id
+        description: NULL for the two total series; a budget's category for budget_category rows.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: period_start
+        description: First day of the forecast month.
+        data_tests: [not_null]
+      - name: horizon
+        description: Months ahead of trained_through; 1 is the next month.
+        data_tests: [not_null]
+      - name: committed_amount
+        description: Recurring charges due that month, projected forward deterministically.
+        data_tests: [not_null]
+      - name: variable_amount
+        description: Statistically modelled discretionary component.
+        data_tests: [not_null]
+      - name: predicted_amount
+        data_tests: [not_null]
+      - name: lower_bound
+        data_tests: [not_null]
+      - name: upper_bound
+        data_tests: [not_null]
+      - name: interval_level
+        description: Interval coverage in percent (e.g. 80).
+        data_tests: [not_null]
+      - name: model_name
+        description: Which candidate won the rolling-origin backtest for this series.
+        data_tests: [not_null]
+      - name: mase
+        description: Backtest error vs. naive; below 1 means the model beat a naive forecast.
+      - name: trend
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rising, falling, flat]
+      - name: trained_through
+        description: Last COMPLETE month used to fit; the partial current month is excluded.
+        data_tests: [not_null]
+
   - name: gold_sankey_flow
     description: >-
       Money-flow edges (source, target, value) for the Phase 6 Sankey
