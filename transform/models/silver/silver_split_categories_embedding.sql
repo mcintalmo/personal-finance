@@ -22,6 +22,7 @@
 with splits as (
     select split_id, product_name
     from {{ ref('silver_amazon_splits') }}
+    where product_name is not null
 ),
 
 stage1 as (

@@ -190,3 +190,15 @@ class TestRecordLabel:
                 _CATEGORY_PATHS,
                 subject_kind=EntityKind.SPLIT,
             )
+
+    def test_unsupported_subject_kind_raises_value_error(self, conn):
+        # DOCUMENT is a real EntityKind, but nothing a human can label — must
+        # raise a clear error, not a bare KeyError from the internal dicts.
+        with pytest.raises(ValueError, match="Cannot label"):
+            record_label(
+                conn,
+                "some-id",
+                "essentials/groceries",
+                _CATEGORY_PATHS,
+                subject_kind=EntityKind.DOCUMENT,
+            )

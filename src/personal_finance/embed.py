@@ -210,7 +210,8 @@ def compute_missing_product_embeddings(
         """
         SELECT DISTINCT product_name
         FROM main_silver.silver_amazon_splits
-        WHERE product_name NOT IN (
+        WHERE product_name IS NOT NULL
+        AND product_name NOT IN (
             SELECT product_name FROM product_embeddings WHERE model = $model
         )
         ORDER BY product_name

@@ -123,7 +123,11 @@ def record_label(
     Raises:
         NotFoundError: `subject_id` isn't a real silver transaction/split for
             `subject_kind`, or `category_path` isn't in the taxonomy.
+        ValueError: `subject_kind` isn't one a human can label (e.g. DOCUMENT).
     """
+    if subject_kind not in _SUBJECT_TABLES:
+        msg = f"Cannot label a {subject_kind.value!r} subject; expected one of {sorted(k.value for k in _SUBJECT_TABLES)}"
+        raise ValueError(msg)
     if category_path not in category_paths:
         msg = f"Unknown category path {category_path!r}. Known paths: {sorted(category_paths)}"
         raise NotFoundError(msg)

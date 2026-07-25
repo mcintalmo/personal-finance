@@ -58,6 +58,36 @@ class TestClassify:
         assert "non-essentials/dining" in prompt
         assert result == ("essentials/groceries", 0.75)
 
+    def test_default_prompt_wording_is_unchanged_by_subject_kind_generalization(self):
+        # Regression guard: generalizing classify() to accept subject_kind
+        # must not change the merchant path's prompt text as a side effect.
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=_chat_response("essentials/groceries", 0.75))
+
+        with client_with_handler(handler) as client:
+            client.classify("KROGER", _PATHS)
+
+        prompt = captured["body"]["messages"][0]["content"]
+        assert "Merchant: KROGER" in prompt
+        assert "Bank transaction merchant: KROGER" not in prompt
+
+    def test_product_subject_kind_changes_prompt_wording(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=_chat_response("essentials/groceries", 0.75))
+
+        with client_with_handler(handler) as client:
+            client.classify("Bounty Paper Towels", _PATHS, subject_kind="product line item")
+
+        prompt = captured["body"]["messages"][0]["content"]
+        assert "Product: Bounty Paper Towels" in prompt
+        assert "product line item" in prompt
+
     def test_confidence_is_clamped_to_zero_one(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_chat_response("essentials/groceries", 1.5))

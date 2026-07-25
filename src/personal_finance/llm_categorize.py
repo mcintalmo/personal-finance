@@ -43,11 +43,22 @@ _RESPONSE_FORMAT = {
 }
 
 
+# Short label for the prompt's "<Label>: <subject>" line — kept distinct from
+# the descriptive subject_kind phrase ("a bank transaction merchant") so the
+# original, unreviewed-verbose "Merchant: ALDI" wording (not "Bank transaction
+# merchant: ALDI") stays exactly what it was before subject_kind existed.
+_SUBJECT_LABELS = {
+    "bank transaction merchant": "Merchant",
+    "product line item": "Product",
+}
+
+
 def _build_prompt(subject_kind: str, subject: str, category_paths: list[str]) -> str:
+    label = _SUBJECT_LABELS.get(subject_kind, subject_kind.capitalize())
     options = "\n".join(f"- {path}" for path in category_paths)
     return (
         f"You are categorizing a {subject_kind} into a personal finance taxonomy.\n\n"
-        f"{subject_kind.capitalize()}: {subject}\n\n"
+        f"{label}: {subject}\n\n"
         "Choose exactly one category from this list (respond with the full "
         f"path, exactly as written):\n{options}\n\n"
         "Respond with a JSON object: `category` (one of the paths above, "
@@ -302,7 +313,8 @@ def compute_missing_product_llm_categories(
         """
         SELECT DISTINCT s.product_name
         FROM main_silver.silver_amazon_splits AS s
-        WHERE s.split_id NOT IN (
+        WHERE s.product_name IS NOT NULL
+        AND s.split_id NOT IN (
             SELECT split_id FROM main_silver.silver_split_categories
         )
         AND s.split_id NOT IN (
