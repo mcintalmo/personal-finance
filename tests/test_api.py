@@ -65,8 +65,6 @@ def test_merchants_top_returns_503_before_transform(client):
     """Regression test: this endpoint used to read main_silver.silver_merchants
     with no build-gate, raising a raw duckdb.CatalogException (bare 500)
     instead of the same friendly 503 every other endpoint gives."""
-    import duckdb
-
     duckdb.connect(str(get_settings().data.warehouse_path)).close()
     response = client.get("/merchants/top")
     assert response.status_code == 503
@@ -75,8 +73,6 @@ def test_merchants_top_returns_503_before_transform(client):
 
 def test_review_queue_returns_503_before_transform(client):
     """Same regression as test_merchants_top_returns_503_before_transform."""
-    import duckdb
-
     duckdb.connect(str(get_settings().data.warehouse_path)).close()
     response = client.get("/review/queue")
     assert response.status_code == 503
@@ -122,8 +118,8 @@ def _prebuilt_warehouse(tmp_path_factory):
     try:
         _build_transformed_warehouse(root)
         # Fold the write-ahead log into the database file. Closing a DuckDB
-        # connection does NOT guarantee this, so the dbt subprocess leaves
-        # every silver view and gold table sitting in warehouse.duckdb.wal —
+        # connection does NOT guarantee this, so the dbt build (in-process,
+        # via dbtRunner) leaves every silver view and gold table in the WAL —
         # and a copy of the .duckdb file alone silently arrives with only the
         # app tables, which surfaces as a baffling 503 from every endpoint.
         with duckdb.connect(str(root / "warehouse.duckdb")) as conn:
@@ -240,8 +236,6 @@ class TestReviewQueue:
         caught by live-verifying against `pf serve` + the Streamlit app)."""
         from datetime import date
         from decimal import Decimal
-
-        import duckdb
 
         from personal_finance import api as api_module
         from personal_finance.config import get_settings

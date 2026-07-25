@@ -6,6 +6,7 @@ module (load_series/compute_forecasts) is exercised in test_dbt.py against a
 real built warehouse, where the SQL it depends on actually exists.
 """
 
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -329,6 +330,47 @@ class TestProjectCommittedCadence:
             RecurringGroup("OLD GYM", "outflow", 40.0, "monthly", 30.4, date(2025, 12, 1), None),
         )
         assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([0.0] * 3)
+
+    def test_biweekly_charge_can_land_three_times_in_one_month(self) -> None:
+        """The reason weekly/biweekly are absent from _CADENCE_MONTHS.
+
+        A true fortnightly paycheck is a 14-day stride, so some months really
+        do contain three of them. Calendar-month stepping cannot express that
+        and would understate income by a full paycheck in those months —
+        14-day steps from 2026-06-19 give 7/3, 7/17 and 7/31.
+        """
+        groups = (
+            RecurringGroup("PAYROLL", "inflow", 2500.0, "biweekly", 14.0, date(2026, 6, 19), None),
+        )
+        projected = _project_committed(groups, date(2026, 6, 1), 3)
+        assert projected == pytest.approx([7500.0, 5000.0, 5000.0])
+
+    def test_semi_monthly_pay_lands_twice_a_month_over_a_short_horizon(self) -> None:
+        """The other population in the [12, 16] biweekly bucket: pay on the 1st
+        and the 15th averages ~15.2 days, which is calendar-anchored rather
+        than a fixed stride. Day-stepping approximates it (15.2 x 2 = 30.4),
+        and this pins that the approximation holds across the horizon rather
+        than drifting a paycheck into the wrong month.
+        """
+        groups = (
+            RecurringGroup("PAYROLL", "inflow", 2500.0, "biweekly", 15.2, date(2026, 6, 15), None),
+        )
+        assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([5000.0] * 3)
+
+    def test_unknown_cadence_is_day_stepped_and_reported(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """dbt owns the cadence vocabulary, so it can grow a bucket this module
+        has never heard of. Day-stepping is a safe default, but doing it
+        silently would drift e.g. an "annual" premium into the wrong month with
+        nothing to notice."""
+        groups = (
+            RecurringGroup("PREMIUM", "outflow", 60.0, "fortnightly", 30.0, date(2026, 6, 1), None),
+        )
+        with caplog.at_level(logging.WARNING, logger="personal_finance.forecast"):
+            projected = _project_committed(groups, date(2026, 6, 1), 3)
+        assert sum(projected) > 0
+        assert "fortnightly" in caplog.text
 
     def test_no_groups_projects_zero(self) -> None:
         assert _project_committed((), date(2026, 6, 1), 3) == [0.0, 0.0, 0.0]

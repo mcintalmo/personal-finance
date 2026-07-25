@@ -18,9 +18,13 @@ overview = get("/overview")
 # full ranked list and the per-kind filters.
 feed = get_optional("/callouts", limit=3)
 LEVEL_WIDGETS = {"critical": st.error, "warning": st.warning, "info": st.info}
-for callout in (feed or {}).get("callouts", []):
+callouts = feed["callouts"] if feed else []
+for callout in callouts:
     LEVEL_WIDGETS.get(callout["level"], st.info)(f"**{callout['title']}** — {callout['detail']}")
-if feed and feed["callouts"]:
+# Linked whenever the feed came back at all, not only when it had something to
+# say: if the band is empty because the request failed, the Callouts page is
+# where the real error is visible, so removing the route would hide it.
+if feed is not None:
     st.page_link("pages/6_Callouts.py", label="See all callouts", icon="\U0001f514")
 
 col1, col2, col3 = st.columns(3)

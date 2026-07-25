@@ -515,12 +515,16 @@ def callouts(
         _require_gold_built(conn, "gold_category_ancestors")
         feed = detect_callouts(conn, limit=limit)
 
+    # Both on stdout: `pf callouts > report.txt` must not capture a bare
+    # all-clear while the caveat that qualifies it goes to the terminal.
     if not feed.forecasts_available:
-        typer.echo(
-            "No forecasts yet — run `pf forecast` for trend and budget-risk callouts.", err=True
-        )
+        typer.echo("No forecasts yet — run `pf forecast` for trend and budget-risk callouts.")
     if not feed.callouts:
-        typer.echo("Nothing notable to report.")
+        typer.echo(
+            "Nothing notable to report."
+            if feed.forecasts_available
+            else "No unusual months found. Trends and budget risk were not checked."
+        )
         return
     for callout in feed.callouts:
         typer.echo(f"[{callout.level.value.upper()}] {callout.title}")

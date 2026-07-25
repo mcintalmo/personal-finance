@@ -43,8 +43,12 @@ gaps as (
         amount,
         flow,
         posted_on,
+        -- Partition key matches `grouped`'s group-by exactly. `flow` is
+        -- functionally dependent on the sign of `amount`, so it changes
+        -- nothing here — but leaving it out forced a reader to derive that
+        -- before they could be sure the two key lists agreed.
         posted_on - lag(posted_on) over (
-            partition by merchant_name, amount order by posted_on
+            partition by merchant_name, amount, flow order by posted_on
         ) as gap_days
     from flows
 ),

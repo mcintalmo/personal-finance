@@ -72,8 +72,12 @@ def _require_table_built(conn: duckdb.DuckDBPyConnection, schema: str, table: st
         {"schema": schema, "table": table},
     ).fetchone()
     if not result or not result[0]:
+        # Name the table: a user whose `pf transform` partially failed has
+        # already run the suggested command, and "run it again" tells them
+        # nothing about which model is actually missing.
         raise HTTPException(
-            status_code=503, detail="dbt models have not been built yet — run `pf transform` first."
+            status_code=503,
+            detail=f"{schema}.{table} has not been built yet — run `pf transform` first.",
         )
 
 

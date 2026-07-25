@@ -64,7 +64,7 @@ still real, but a callout the user cannot act on is noise on a dashboard."""
 MIN_ANOMALY_HISTORY_MONTHS = 6
 """Months of history required before any month can be called unusual. Below
 this a median is not a description of "typical" — with three points the third
-one always looks extreme relative to the other two.
+can easily look extreme relative to the other two.
 
 Deliberately its own constant rather than the forecaster's
 :data:`~personal_finance.forecast.MIN_HISTORY_MONTHS`, which they currently
@@ -73,13 +73,17 @@ happen to agree on: one is "enough points to fit a model", the other is
 a change to the forecasting floor silently move the anomaly threshold."""
 
 _MAD_TO_SIGMA = 0.6745
-"""Consistency constant: MAD * this approximates a normal distribution's
-standard deviation, which is what makes 3.5 comparable to a z-score."""
+"""Consistency constant: MAD **divided by** this approximates a normal
+distribution's standard deviation (equivalently MAD * 1.4826), which is what
+makes 3.5 comparable to an ordinary z-score. Note the direction — dividing
+widens the scale, and "correcting" this to a multiplication would shrink it
+by ~2.2x and make almost every month look anomalous."""
 
 _MEANAD_TO_SIGMA = 1.253314
 """Fallback scale when MAD is exactly 0 — which happens whenever more than
-half the months are identical (a category that is usually 0). Without it every
-nonzero month in a mostly-zero series would divide by zero."""
+half the months are identical (a category that is usually 0). Without it
+`_robust_scale` returns 0, the caller bails, and anomaly detection is silently
+switched off for exactly the categories where one big month matters most."""
 
 _MONTHS_PER_PERIOD: dict[BudgetPeriod, float] = {
     BudgetPeriod.WEEKLY: 7 / (365.25 / 12),
@@ -243,17 +247,27 @@ SELECT
 FROM forecasts AS f
 LEFT JOIN budgets AS b
     ON b.id = f.series_key AND f.series_kind = 'budget_category'
-WHERE f.horizon = 1
+WHERE f.period_start >= $current_month
+QUALIFY row_number() OVER (
+    PARTITION BY f.series_kind, f.series_key ORDER BY f.period_start
+) = 1
 ORDER BY f.series_key
 """
-"""The next month's forecast for every series, with the budget it is measured
-against when there is one.
+"""The nearest still-relevant forecast month per series, with the budget it is
+measured against when there is one.
 
 Reads the `forecasts` app table rather than `gold_forecasts`: the gold model
 is only refreshed by the next `pf transform`, so between `pf forecast` and
 that run the mart holds the *previous* forecast — and a callout is a claim
-about right now. horizon = 1 because a callout is about the month the user is
-in a position to change; horizon 3 is context for a chart, not a nudge.
+about right now.
+
+Selected by `period_start >= $current_month` rather than `horizon = 1`, which
+is the same row only when `pf forecast` ran this month. Forecasts are written
+whenever the user last ran the command: run it in June, open the dashboard in
+late July, and horizon 1 is *June* — a month that has already ended. Nudging
+someone about a month they can no longer change is worse than saying nothing,
+so a fully stale forecast yields no rows here, `forecasts_available` goes
+False, and the UI asks for a re-run.
 """
 
 
@@ -295,23 +309,28 @@ def _trend_callout(row: ForecastRow, history: SeriesHistory | None) -> Callout |
     # average against; comparing to that zero would divide by it.
     totals = history.totals if history is not None else ()
     baseline = statistics.mean(totals) if totals else 0.0
+    # Name the month rather than saying "next month". Horizon 1 is
+    # trained_through + 1, and trained_through is the last COMPLETE month — so
+    # horizon 1 is the month the user is currently standing in, not the one
+    # after it. "Next month" would be off by one every single time.
+    month = f"{row.period_start:%B %Y}"
     if baseline <= 0:
-        comparison = f"next month is projected at {_money(predicted)}."
+        comparison = f"{month} is projected at {_money(predicted)}."
         rank = 0.0
     else:
         change = (predicted - baseline) / baseline
         comparison = (
-            f"next month is projected at {_money(predicted)}, "
+            f"{month} is projected at {_money(predicted)}, "
             f"{abs(change):.0%} {'above' if change >= 0 else 'below'} the "
             f"{_money(baseline)} average of the last {len(totals)} months."
         )
         rank = abs(change)
 
-    noun = "Spending" if outflow else "Income"
+    noun = "spending" if outflow else "income"
     return Callout(
         kind=CalloutKind.TREND,
         level=CalloutLevel.WARNING if rising == outflow else CalloutLevel.INFO,
-        title=f"{row.series_label}: {noun.lower()} is trending {'up' if rising else 'down'}",
+        title=f"{row.series_label}: {noun} is trending {'up' if rising else 'down'}",
         detail=f"The fitted trend over the observed history is {trend.value}, and {comparison}",
         series_kind=kind,
         series_key=row.series_key,
@@ -323,7 +342,7 @@ def _trend_callout(row: ForecastRow, history: SeriesHistory | None) -> Callout |
 
 
 def _budget_risk_callout(row: ForecastRow) -> Callout | None:
-    """Flag a budget whose next month is projected to run over.
+    """Flag a budget whose nearest forecast month is projected to run over.
 
     Uses the forecast's lower bound to separate "might overrun" from "will
     overrun barring a change": if even the optimistic end of the interval
@@ -391,7 +410,8 @@ def detect_callouts(
     ``limit`` caps the returned list *after* ranking, so trimming drops the
     least notable callouts rather than an arbitrary slice.
     """
-    trained_through = last_complete_month(today or date.today())
+    as_of = today or date.today()
+    trained_through = last_complete_month(as_of)
     histories = load_series(conn, trained_through)
     by_key = {history.key: history for history in histories}
 
@@ -399,9 +419,31 @@ def detect_callouts(
     for history in histories:
         callouts.extend(_anomaly_callouts(history, trained_through))
 
-    forecast_rows = [ForecastRow(*values) for values in conn.execute(_NEXT_FORECAST_SQL).fetchall()]
+    # The month in progress: the first one a forecast can still be about.
+    cursor = conn.execute(_NEXT_FORECAST_SQL, {"current_month": as_of.replace(day=1)})
+    # Positional construction catches a column being added or removed (arity),
+    # but not two same-typed columns swapping places — and swapping
+    # lower_bound with upper_bound would silently invert the CRITICAL/WARNING
+    # split in _budget_risk_callout with no error anywhere. DuckDB hands back
+    # the select aliases, which are exactly the field names.
+    columns = tuple(description[0] for description in cursor.description)
+    if columns != ForecastRow._fields:
+        message = f"_NEXT_FORECAST_SQL returns {columns}, ForecastRow expects {ForecastRow._fields}"
+        raise RuntimeError(message)
+    forecast_rows = [ForecastRow(*values) for values in cursor.fetchall()]
     for row in forecast_rows:
-        trend = _trend_callout(row, by_key.get(row.series_key))
+        history = by_key.get(row.series_key)
+        if history is None:
+            # Forecast rows are written from load_series' own output, so a miss
+            # means the two are out of step (a deleted budget, a changed key
+            # derivation) rather than a genuinely new series. The callout is
+            # still emitted, without a baseline — but say so, because silently
+            # degrading looks identical to a brand-new budget.
+            logger.warning(
+                "forecast row %r has no matching history; its trend callout has no baseline",
+                row.series_key,
+            )
+        trend = _trend_callout(row, history)
         if trend is not None:
             callouts.append(trend)
         risk = _budget_risk_callout(row)

@@ -49,7 +49,7 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, NamedTuple
 
-from personal_finance.models import Forecast, ForecastSeriesKind, TrendDirection
+from personal_finance.models import Flow, Forecast, ForecastSeriesKind, TrendDirection
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -96,7 +96,12 @@ class RecurringGroup:
     """
 
     merchant_name: str
-    flow: str  # inflow | outflow
+    # A closed set, parsed on the way out of the warehouse — code partitions on
+    # it, so an unrecognized value must fail loudly rather than fall out of
+    # every branch. `cadence` is deliberately NOT an enum: _next_charge treats
+    # it as an open set with a correct day-stepping default, so a new dbt
+    # bucket (as `biweekly` just was) needs no Python change.
+    flow: Flow
     amount: float
     cadence: str  # weekly | biweekly | monthly | quarterly | yearly
     avg_gap_days: float
@@ -481,15 +486,37 @@ def forecast_series(
 _CADENCE_MONTHS = {"monthly": 1, "quarterly": 3, "yearly": 12}
 """Calendar-month step per cadence. Stepping by avg_gap_days instead drifts:
 30.4-day hops from a June charge put two "monthly" charges in July and none in
-some later month. Weekly and biweekly are deliberately absent — they really
-are fixed day counts, and a fortnightly paycheck genuinely does land three
-times in some months, so day-stepping is the correct projection there."""
+some later month."""
+
+_DAY_STEPPED_CADENCES = frozenset({"weekly", "biweekly"})
+"""Cadences deliberately stepped by observed days rather than calendar months.
+
+A true fortnightly charge is a fixed 14-day stride and genuinely does land
+three times in some months, which calendar stepping cannot express.
+
+Caveat worth knowing: the `biweekly` bucket is [12, 16] days, so it also
+catches *semi-monthly* pay (the 1st and the 15th, ~15.2 days apart), which is
+calendar-anchored and always lands exactly twice a month. Day-stepping
+approximates that well over a short horizon — 15.2 x 2 = 30.4 — but it does
+slowly drift, so a long enough horizon would eventually mis-bin a paycheck.
+Accepted deliberately: splitting the bucket would need a stride-vs-anchored
+distinction the detector cannot currently make."""
 
 
 def _next_charge(charge_on: date, cadence: str, avg_gap_days: float) -> date:
     """The next charge date after ``charge_on`` for this cadence."""
     months = _CADENCE_MONTHS.get(cadence)
-    if months is None:  # weekly, or an unrecognized label — fall back to the gap
+    if months is None:
+        if cadence not in _DAY_STEPPED_CADENCES:
+            # dbt owns the cadence vocabulary (transform/dbt_project.yml), so
+            # it can gain a bucket this module has never heard of. Day-stepping
+            # is a safe default, but a silently day-stepped "annual" would
+            # drift a premium into the wrong month, so say so.
+            logger.warning(
+                "unknown cadence %r; projecting by its %.1f-day average gap",
+                cadence,
+                avg_gap_days,
+            )
         return charge_on + timedelta(days=max(1.0, avg_gap_days))
     year_delta, month_index = divmod(charge_on.month - 1 + months, 12)
     year, month = charge_on.year + year_delta, month_index + 1
@@ -699,7 +726,7 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
     groups = tuple(
         RecurringGroup(
             merchant_name=name,
-            flow=flow,
+            flow=Flow(flow),
             amount=float(amount),
             cadence=cadence,
             avg_gap_days=float(avg_gap_days),
@@ -710,8 +737,8 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             _RECURRING_GROUPS_SQL
         ).fetchall()
     )
-    inflow_groups = tuple(g for g in groups if g.flow == "inflow")
-    outflow_groups = tuple(g for g in groups if g.flow == "outflow")
+    inflow_groups = tuple(g for g in groups if g.flow is Flow.INFLOW)
+    outflow_groups = tuple(g for g in groups if g.flow is Flow.OUTFLOW)
     subtree: dict[str, set[str]] = {}
     for budget_id, category_id in conn.execute(_BUDGET_SUBTREE_SQL).fetchall():
         subtree.setdefault(budget_id, set()).add(category_id)

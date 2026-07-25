@@ -119,6 +119,39 @@ Phase 6 demo):
       by it; multiplying turned a $6,000/year cap into $72,000 and would have made every yearly
       budget read as permanently, silently under budget.
 
+      **A six-agent pre-merge review found one user-facing bug and several vacuous tests.**
+      The callout prose said "next month is projected at $X" about the month *currently in
+      progress*: horizon 1 is `trained_through + 1`, and `trained_through` is the last COMPLETE
+      month, so it was off by one every single time. Worse, `pf forecast` is run by hand, so its
+      rows can be months old — selecting `horizon = 1` blindly would nudge the user about a month
+      that had already ended. Both fixed: the callout names the month, and the query now selects
+      the nearest forecast month at-or-after the current one, so a fully stale forecast yields no
+      rows and the UI asks for a re-run.
+      Also fixed: `_MAD_TO_SIGMA`'s docstring had the operation inverted (said "MAD * this" where
+      the code correctly divides) — dangerous because a maintainer would "fix" the code to match
+      and shrink the scale ~2.2x, flagging almost every month; `get_optional` swallowed *every*
+      non-2xx rather than the 503 its docstring reasoned about, so a 500 rendered identically to
+      "no callouts"; timeouts weren't caught at all, and `/callouts` is the likeliest endpoint to
+      hit one; and `ForecastRow`'s positional unpacking was guarded for arity but not order, so
+      swapping `lower_bound`/`upper_bound` would silently invert the CRITICAL/WARNING split.
+      A new `Flow` enum replaces the bare inflow/outflow strings: the partition dropped an
+      unrecognized value from *both* halves, and money vanishing that way is invisible to
+      `predicted == committed + variable`, which still holds perfectly.
+      **Three tests were vacuous and one was tautological.** Nothing would have caught income
+      double-counting if the committed/variable join regressed (the projection and the history
+      split are independent paths, and the sum invariant holds fine at twice the right value);
+      nothing verified the budgets LEFT JOIN, so `BUDGET_RISK` could have been dead code;
+      `test_limit_keeps_the_most_notable` used a one-callout feed with `limit=1`; and the rank
+      test asserted the list was sorted by its own sort key, which passes if every rank is 0.
+      Biweekly projection had no unit test at all despite being the reason `_CADENCE_MONTHS`
+      omits it — there is now one proving three fortnightly paychecks really do land in one month.
+      **One finding was rejected after checking:** a reviewer argued `_BUDGET_SQL` front-pads
+      budget history with fake zeros because it ignores `budgets.starts_on`, fabricating an
+      anomaly for every new budget. Budget history is the *category's* real spend, not
+      budget-scoped — verified directly (Groceries: 18 months of genuine spend, zero zero-months).
+      A new budget over an established category inherits that real history, so there was nothing
+      to fix.
+
       **Test suite sped up ~4x along the way** (measured, not estimated). `test_api.py` was
       207s, of which 203s was fixture setup: `built_warehouse` was function-scoped, so ten tests
       each paid a full init-db + synth + 3 ingests + dbt build (~20s) to exercise under three

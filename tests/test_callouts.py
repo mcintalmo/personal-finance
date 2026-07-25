@@ -296,11 +296,67 @@ class TestBudgetRiskCallout:
         assert "fortnightly" in caplog.text
 
 
+# Rows shaped like _NEXT_FORECAST_SQL's output, in select order. Shared by the
+# ranking and limit tests so both exercise a feed with all three levels in it.
+_MIXED_ROWS = [
+    # A budget certain to overrun -> CRITICAL. trend flat, so this row
+    # contributes exactly one callout.
+    (
+        "budget_category",
+        "budget-1",
+        "Dining out",
+        "cat-1",
+        date(2026, 7, 1),
+        700.0,
+        600.0,
+        800.0,
+        "flat",
+        400.0,
+        BudgetPeriod.MONTHLY.value,
+    ),
+    # Spending trending up -> WARNING, well above the ~400 average.
+    (
+        "total_outflow",
+        "total_outflow",
+        "Total spend",
+        None,
+        date(2026, 7, 1),
+        1200.0,
+        900.0,
+        1500.0,
+        TrendDirection.RISING.value,
+        None,
+        None,
+    ),
+    # Income trending up -> good news, INFO.
+    (
+        "total_inflow",
+        "total_inflow",
+        "Total income",
+        None,
+        date(2026, 7, 1),
+        3600.0,
+        3400.0,
+        3800.0,
+        TrendDirection.RISING.value,
+        None,
+        None,
+    ),
+]
+
+
 class _FakeConn:
-    """Stands in for a DuckDB connection returning fixed forecast rows."""
+    """Stands in for a DuckDB connection returning fixed forecast rows.
+
+    Exposes `description` because `detect_callouts` checks the cursor's column
+    names against `ForecastRow._fields` before unpacking positionally. Making
+    the fake satisfy that contract is deliberate: a fake that skipped it would
+    let the tests keep passing while the real query drifted out of order.
+    """
 
     def __init__(self, rows: list[tuple]) -> None:
         self._rows = rows
+        self.description = [(name,) for name in ForecastRow._fields]
 
     def execute(self, sql: str, params: dict | None = None) -> _FakeConn:
         return self
@@ -339,53 +395,7 @@ class TestDetectCallouts:
 
     @pytest.fixture
     def mixed_feed(self, histories: list[SeriesHistory]) -> CalloutFeed:
-        # Column order matches _NEXT_FORECAST_SQL.
-        rows = [
-            # A budget certain to overrun -> CRITICAL. trend flat, so this row
-            # contributes exactly one callout.
-            (
-                "budget_category",
-                "budget-1",
-                "Dining out",
-                "cat-1",
-                date(2026, 7, 1),
-                700.0,
-                600.0,
-                800.0,
-                "flat",
-                400.0,
-                BudgetPeriod.MONTHLY.value,
-            ),
-            # Spending trending up -> WARNING, well above the ~400 average.
-            (
-                "total_outflow",
-                "total_outflow",
-                "Total spend",
-                None,
-                date(2026, 7, 1),
-                1200.0,
-                900.0,
-                1500.0,
-                TrendDirection.RISING.value,
-                None,
-                None,
-            ),
-            # Income trending up -> good news, INFO.
-            (
-                "total_inflow",
-                "total_inflow",
-                "Total income",
-                None,
-                date(2026, 7, 1),
-                3600.0,
-                3400.0,
-                3800.0,
-                TrendDirection.RISING.value,
-                None,
-                None,
-            ),
-        ]
-        return detect_callouts(_FakeConn(rows), today=date(2026, 7, 15))
+        return detect_callouts(_FakeConn(_MIXED_ROWS), today=date(2026, 7, 15))
 
     def test_ranks_critical_above_warning_above_info(self, mixed_feed: CalloutFeed) -> None:
         assert mixed_feed.forecasts_available is True
@@ -400,12 +410,21 @@ class TestDetectCallouts:
         assert mixed_feed.callouts[-1].kind is CalloutKind.TREND
 
     def test_ranks_the_bigger_deviation_first_within_a_level(self, mixed_feed: CalloutFeed) -> None:
+        """Asserts the concrete order, not that the list is sorted by its own
+        sort key — the latter passes even if every rank collapsed to 0.0,
+        which is exactly the regression worth catching."""
         warnings = [c for c in mixed_feed.callouts if c.level is CalloutLevel.WARNING]
-        assert [c.rank for c in warnings] == sorted((c.rank for c in warnings), reverse=True)
+        # The spend spike is ~5 robust sigma; the rising-spend trend is ~2x the
+        # ~400 average, i.e. rank ~2. So the spike must come first.
+        assert [c.kind for c in warnings] == [CalloutKind.SPIKE, CalloutKind.TREND]
+        assert warnings[0].rank > warnings[1].rank > 0
 
     def test_limit_keeps_the_most_notable(self, histories: list[SeriesHistory]) -> None:
         """Trimming has to happen after ranking — a limit that dropped the
         critical budget overrun to keep an informational trend would be worse
-        than no limit at all."""
-        feed = detect_callouts(_FakeConn([]), today=date(2026, 7, 15), limit=1)
-        assert [c.kind for c in feed.callouts] == [CalloutKind.SPIKE]
+        than no limit at all. Uses the mixed feed deliberately: with a
+        single-callout feed, any limit >= 1 is a no-op and the test proves
+        nothing about ordering."""
+        feed = detect_callouts(_FakeConn(_MIXED_ROWS), today=date(2026, 7, 15), limit=2)
+        assert [c.level for c in feed.callouts] == [CalloutLevel.CRITICAL, CalloutLevel.WARNING]
+        assert feed.callouts[0].kind is CalloutKind.BUDGET_RISK
