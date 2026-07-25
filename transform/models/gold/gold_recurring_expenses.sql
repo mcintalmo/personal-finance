@@ -8,8 +8,12 @@
 -- Heuristic: group same-merchant, same-amount outflows, require at least 3
 -- occurrences (2 gaps — one gap alone can't distinguish "regular" from
 -- "coincidence"), bucket the average gap into a cadence, then keep only
--- groups where the gap is actually regular (stddev <= 25% of the average) —
--- a merchant charged the same amount twice at random is not "recurring".
+-- groups where the gap is actually regular (stddev <= recurring_regularity_
+-- threshold of the average) — a merchant charged the same amount twice at
+-- random is not "recurring". Cadence day-ranges and the regularity threshold
+-- are dbt vars (transform/dbt_project.yml), same convention as every other
+-- tunable heuristic cutoff in this project (transfer_window_days,
+-- embedding_confidence_threshold, ...).
 
 with charges as (
     select merchant_name, amount, posted_on
@@ -46,16 +50,20 @@ cadenced as (
     select
         *,
         case
-            when avg_gap_days between 5 and 9 then 'weekly'
-            when avg_gap_days between 25 and 35 then 'monthly'
-            when avg_gap_days between 80 and 100 then 'quarterly'
-            when avg_gap_days between 350 and 380 then 'yearly'
+            when avg_gap_days between {{ var('recurring_weekly_gap_days')[0] }}
+                and {{ var('recurring_weekly_gap_days')[1] }} then 'weekly'
+            when avg_gap_days between {{ var('recurring_monthly_gap_days')[0] }}
+                and {{ var('recurring_monthly_gap_days')[1] }} then 'monthly'
+            when avg_gap_days between {{ var('recurring_quarterly_gap_days')[0] }}
+                and {{ var('recurring_quarterly_gap_days')[1] }} then 'quarterly'
+            when avg_gap_days between {{ var('recurring_yearly_gap_days')[0] }}
+                and {{ var('recurring_yearly_gap_days')[1] }} then 'yearly'
         end as cadence
     from grouped
 )
 
 select
-    md5(merchant_name || amount::text) as recurring_expense_id,
+    md5(merchant_name || '|' || amount::text) as recurring_expense_id,
     merchant_name,
     -amount as amount,
     cadence,
@@ -66,4 +74,4 @@ select
     gap_days_stddev
 from cadenced
 where cadence is not null
-and gap_days_stddev <= avg_gap_days * 0.25
+and gap_days_stddev <= avg_gap_days * {{ var('recurring_regularity_threshold') }}

@@ -152,6 +152,12 @@ models:
         data_tests: [not_null]
       - name: last_seen_on
         data_tests: [not_null]
+      - name: avg_gap_days
+        description: Average days between consecutive charges; the value cadence is bucketed from.
+        data_tests: [not_null]
+      - name: gap_days_stddev
+        description: Population stddev of the gaps; always <= avg_gap_days * recurring_regularity_threshold.
+        data_tests: [not_null]
 
   - name: gold_sankey_flow
     description: >-
