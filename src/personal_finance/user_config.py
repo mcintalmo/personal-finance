@@ -116,7 +116,11 @@ class SourceConfig(_ConfigModel):
 
     @model_validator(mode="after")
     def _check_account_fields(self) -> SourceConfig:
-        if self.kind in (SourceKind.CSV, SourceKind.OFX) and (
+        # Denylist (not allowlist): every kind except the enrichment-style
+        # AMAZON requires account fields, so a future account-bound SourceKind
+        # is covered automatically instead of silently passing validation if
+        # its author forgets to add it to an allowlist here.
+        if self.kind != SourceKind.AMAZON and (
             self.account_name is None or self.account_type is None
         ):
             msg = (

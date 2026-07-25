@@ -1,6 +1,7 @@
 """Run a source's dlt resource into the Parquet-backed bronze layer."""
 
 import threading
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import dlt
@@ -14,6 +15,7 @@ from personal_finance.ingest.ofx_source import ofx_transactions
 from personal_finance.user_config import SourceKind
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from dlt.common.pipeline import LoadInfo
@@ -96,24 +98,12 @@ def _run_locked(
 
 def run_csv_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
     """Ingest one CSV export file into the bronze layer."""
-    return _run(source, csv_transactions(source, file_path), bronze_dir)
-
-
-def dataset_name_for(source: SourceConfig) -> str:
-    """Return the bronze dataset a source's rows land in — see ``_run``.
-
-    Every ``SourceConfig.kind`` maps to exactly one dataset; used both here
-    and by callers (``watch.ingest_file``) that need to read back a source's
-    row count without duplicating the kind -> dataset mapping.
-    """
-    if source.kind == SourceKind.AMAZON:
-        return "bronze_amazon"
-    return "bronze"
+    return _run(source, csv_transactions(source, file_path), bronze_dir, dataset_name="bronze")
 
 
 def run_ofx_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
     """Ingest one OFX/QFX export file into the bronze layer."""
-    return _run(source, ofx_transactions(source, file_path), bronze_dir)
+    return _run(source, ofx_transactions(source, file_path), bronze_dir, dataset_name="bronze")
 
 
 def run_amazon_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
@@ -123,11 +113,36 @@ def run_amazon_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path
     for why an order-history row can't share the generic transactions dataset.
     """
     return _run(
-        source,
-        amazon_order_items(source, file_path),
-        bronze_dir,
-        dataset_name=dataset_name_for(source),
+        source, amazon_order_items(source, file_path), bronze_dir, dataset_name="bronze_amazon"
     )
+
+
+@dataclass(frozen=True)
+class _KindHandling:
+    """The bronze dataset and ingest function for one ``SourceKind``.
+
+    A single table pairing both, instead of two separately-maintained
+    kind-dispatch chains — adding a new kind that needs its own dataset can't
+    drift between "where it writes" and "where it's read back from"
+    (``dataset_name_for``, used by both ``run_*_ingestion`` and
+    ``watch.ingest_file``'s row-count checks) because there is only one entry
+    to add.
+    """
+
+    dataset_name: str
+    run: Callable[[SourceConfig, Path, Path], LoadInfo]
+
+
+_DEFAULT_HANDLING = _KindHandling("bronze", run_csv_ingestion)
+_KIND_HANDLING: dict[SourceKind, _KindHandling] = {
+    SourceKind.OFX: _KindHandling("bronze", run_ofx_ingestion),
+    SourceKind.AMAZON: _KindHandling("bronze_amazon", run_amazon_ingestion),
+}
+
+
+def dataset_name_for(source: SourceConfig) -> str:
+    """Return the bronze dataset a source's rows land in — see ``_run``."""
+    return _KIND_HANDLING.get(source.kind, _DEFAULT_HANDLING).dataset_name
 
 
 def run_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> LoadInfo:
@@ -136,8 +151,4 @@ def run_ingestion(source: SourceConfig, file_path: Path, bronze_dir: Path) -> Lo
     Raises:
         IngestionError: If the file cannot be parsed.
     """
-    if source.kind == SourceKind.OFX:
-        return run_ofx_ingestion(source, file_path, bronze_dir)
-    if source.kind == SourceKind.AMAZON:
-        return run_amazon_ingestion(source, file_path, bronze_dir)
-    return run_csv_ingestion(source, file_path, bronze_dir)
+    return _KIND_HANDLING.get(source.kind, _DEFAULT_HANDLING).run(source, file_path, bronze_dir)

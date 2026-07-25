@@ -24,6 +24,8 @@ from decimal import Decimal
 from random import Random
 from typing import TYPE_CHECKING
 
+from personal_finance.synth.scenario import AMAZON_CATEGORY_HINT
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -79,7 +81,7 @@ def _decompose_items(rng: Random, subtotal: Decimal) -> list[tuple[str, str, Dec
     """Split a shipment subtotal into 1-3 catalog (asin, name, unit_price) items summing to it."""
     items: list[tuple[str, str, Decimal]] = []
     remaining = subtotal
-    for _ in range(rng.randrange(0, 2)):
+    for _ in range(rng.randrange(0, 3)):
         ceiling = min(remaining - Decimal("2.00"), Decimal("60.00"))
         if ceiling < Decimal("2.00"):
             break
@@ -104,7 +106,7 @@ def generate_amazon_orders(scenario: Scenario, seed: int = 42) -> list[AmazonOrd
     amazon_charges = [
         t
         for t in scenario.credit.transactions
-        if t.category_hint == "Shopping" and t.txn_type == "purchase"
+        if t.category_hint == AMAZON_CATEGORY_HINT and t.txn_type == "purchase"
     ]
     for txn in amazon_charges:
         total = -txn.amount

@@ -20,7 +20,12 @@ from personal_finance.ingest.watch import (
     sweep_folder,
     watch_folder,
 )
-from personal_finance.synth import generate_scenario, write_scenario
+from personal_finance.synth import (
+    generate_amazon_orders,
+    generate_scenario,
+    write_amazon_orders,
+    write_scenario,
+)
 from personal_finance.user_config import SourceConfig, load_user_config
 
 EXAMPLES_CONFIG_DIR = Path(__file__).parent.parent / "config" / "examples"
@@ -82,6 +87,18 @@ class TestIngestFile:
         outcome = ingest_file(exports / "ofx.ofx", sources_map(), tmp_path / "bronze")
         assert outcome.status is IngestStatus.UNMATCHED
         assert outcome.source == "ofx"
+
+    def test_amazon_export_resolves_by_fixed_filename(self, scenario, tmp_path):
+        # Retail.OrderHistory.1.csv's stem never matches the configured `amazon`
+        # source name, so this only ingests if the fixed-filename fallback works.
+        amazon_dir = tmp_path / "amazon_export"
+        write_amazon_orders(generate_amazon_orders(scenario, seed=42), amazon_dir)
+        outcome = ingest_file(
+            amazon_dir / "Retail.OrderHistory.1.csv", sources_map(), tmp_path / "bronze"
+        )
+        assert outcome.status is IngestStatus.INGESTED
+        assert outcome.source == "amazon"
+        assert outcome.new_rows > 0
 
     def test_unparseable_file_returns_failed(self, tmp_path):
         bad = tmp_path / "chase_checking.csv"

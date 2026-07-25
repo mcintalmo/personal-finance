@@ -101,6 +101,30 @@ class TestTransform:
         assert result.exit_code == 1
         assert "No ingested data" in result.output
 
+    def test_amazon_only_bronze_reports_missing_bank_source(self, tmp_path):
+        # Amazon's rows land under bronze_amazon/, not bronze/ — silver_transactions
+        # still needs at least one bank/card source ingested, so this must fail with
+        # a message naming what's actually missing, not the generic "no data" one.
+        init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+        assert init.exit_code == 0, init.output
+        synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "1"])
+        assert synth.exit_code == 0, synth.output
+        ingest = runner.invoke(
+            app,
+            [
+                "ingest",
+                str(tmp_path / "synth" / "amazon" / "Retail.OrderHistory.1.csv"),
+                "--source",
+                "amazon",
+                "--config-dir",
+                "config/examples",
+            ],
+        )
+        assert ingest.exit_code == 0, ingest.output
+        result = runner.invoke(app, ["transform"])
+        assert result.exit_code == 1
+        assert "bank/card source" in result.output
+
     @pytest.mark.filterwarnings("ignore")
     def test_builds_after_init_db_and_ingest(self, tmp_path):
         init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])

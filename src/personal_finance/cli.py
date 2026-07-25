@@ -153,10 +153,23 @@ def transform(
         typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
         raise typer.Exit(code=1)
     bronze = settings.data.bronze_path
+    # bronze.transactions (sources.yml) reads bronze/*/*.parquet with a plain
+    # read_parquet(), which throws on zero files — unlike Amazon's tolerant
+    # read_parquet_or_empty — so at least one bank/card source must already be
+    # ingested; Amazon-only data can't satisfy that on its own.
     if not any((bronze / "bronze").glob("*/*.parquet")):
-        typer.echo(
-            f"No ingested data under {bronze} — run `pf ingest` (or `pf watch`) first.", err=True
-        )
+        if any(bronze.glob("bronze_*/*/*.parquet")):
+            typer.echo(
+                f"Only enrichment data (e.g. Amazon order-history) found under {bronze} — "
+                "`pf transform` also needs at least one ingested bank/card source. Run "
+                "`pf ingest` (or `pf watch`) for one first.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"No ingested data under {bronze} — run `pf ingest` (or `pf watch`) first.",
+                err=True,
+            )
         raise typer.Exit(code=1)
     config = _load_config_or_exit(config_dir)
     os.environ.setdefault("DATA_WAREHOUSE_PATH", str(warehouse))

@@ -19,7 +19,7 @@ order number) are dropped rather than landed into bronze.
 import csv
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import InvalidOperation
 
 # Path/Iterator/date must be REAL imports: dlt's @dlt.resource introspects the
 # decorated function's signature at import time. See csv_source.py.
@@ -28,19 +28,11 @@ from pathlib import Path
 import dlt
 
 from personal_finance.exceptions import IngestionError
+from personal_finance.ingest.csv_source import _parse_amount_unsigned as _parse_amount
 from personal_finance.ingest.dedup import compute_amazon_row_hash
 from personal_finance.user_config import SourceConfig
 
 BronzeRow = dict[str, object]
-
-
-def _strip_currency(raw: str) -> str:
-    return raw.strip().replace("$", "").replace(",", "").strip()
-
-
-def _parse_amount(raw: str) -> Decimal:
-    stripped = _strip_currency(raw)
-    return Decimal(stripped) if stripped else Decimal("0")
 
 
 def _parse_date(raw: str) -> date:

@@ -1,5 +1,6 @@
 """Tests for personal_finance.ingest.amazon_source and Amazon pipeline dispatch."""
 
+import re
 from pathlib import Path
 
 import duckdb
@@ -110,6 +111,36 @@ class TestAmazonOrderItems:
         second = len(bronze_rows(bronze, "amazon"))
         assert first == len(orders)
         assert second == first
+
+    def test_empty_columns_schema_matches_real_bronze_columns(self, amazon_dir, tmp_path):
+        """``read_parquet_or_empty``'s hand-maintained empty-relation schema in
+        stg_amazon_order_items.sql must list exactly the columns real Amazon
+        bronze rows have — otherwise a build that never ingests an Amazon file
+        (the common case) silently gets a wrong-shaped empty relation. This
+        guards the two from drifting apart undetected.
+        """
+        sql_path = (
+            Path(__file__).parent.parent
+            / "transform"
+            / "models"
+            / "silver"
+            / "stg_amazon_order_items.sql"
+        )
+        sql = sql_path.read_text(encoding="utf-8")
+        match = re.search(r"read_parquet_or_empty\(.*?\[(.*?)\]\s*\)\s*\}\}", sql, re.DOTALL)
+        assert match, "could not find read_parquet_or_empty(...) call in stg_amazon_order_items.sql"
+        empty_columns = set(re.findall(r"\['(\w+)',\s*'[^']+'\]", match.group(0)))
+
+        bronze = tmp_path / "bronze"
+        run_amazon_ingestion(amazon_source(), amazon_dir / "Retail.OrderHistory.1.csv", bronze)
+        real_columns = set(bronze_columns(bronze, "amazon")) - {
+            "source",
+            "source_file",
+            "_dlt_id",
+            "_dlt_load_id",
+        }
+
+        assert empty_columns == real_columns
 
     def test_malformed_row_raises_ingestion_error(self, tmp_path):
         bad = tmp_path / "bad.csv"
