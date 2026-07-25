@@ -5,7 +5,7 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 6 — Serving
+## Phase 7 — Intelligence
 
 > Phase 1 (Foundation) complete — demo verified 2026-07-12.
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
@@ -31,13 +31,10 @@ Costco has no order-history export (confirmed against docs/source-schemas.md —
 receipts only), so Phase 5 targeted Amazon only; Costco (and other photo/PDF-only receipts) stays
 in Phase 9 until vision-LLM parsing exists.
 
-- [x] FastAPI API layer over gold marts: see Done below.
-- [x] Streamlit app shell: overview dashboard (net flow, spend over time, top movers): see Done below.
-- [x] Sunburst drill-down of the category hierarchy: see Done below.
-- [x] Sankey of money flow (income → accounts → category subtrees): see Done below.
-- [x] Budget buckets: define in YAML, budget vs. actual views: see Done below.
-- [x] Review-queue UI (approve/correct categorizations): see Done below.
-- [x] Config editing from within the app: see Done below.
+- [ ] ⏳ IN PROGRESS Recurring-expense detection (heuristic dbt model: merchant + amount + cadence)
+- [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
+- [ ] Forecasting of spend/income (statsforecast)
+- [ ] Trend and anomaly callouts on the dashboard
 
 ## Backlog (later phases)
 
@@ -48,6 +45,23 @@ one phase at a time when the previous phase's demo is complete.
 
 - [x] Merchant normalization evaluation + config-driven aliases: see Done below.
 - [x] Merchant resolution for the outlier tail: see Done below.
+
+**Phase 6 UI follow-ups** (deferred to Phase 8 — Automation & polish, per user feedback after the
+Phase 6 demo):
+
+- [ ] Dashboard filters/slicers (month range, category, account) — needs matching optional query
+      params on the gold-mart endpoints (`start_month`/`end_month`/`category_id`/`account_name`)
+      plus a shared sidebar filter widget threaded through Overview/Sunburst/Sankey/Budgets.
+- [ ] Inline review-queue labeling: replace the ID-copy-paste flow with a category dropdown
+      (`st.data_editor` + `SelectboxColumn`) populated from the real taxonomy
+      (`llm_categorize.fetch_category_paths`), with an "add new category" affordance — no manual
+      ID entry.
+- [ ] Config editor as structured per-field forms (select/number/list add-delete) instead of raw
+      YAML text. Evaluate `streamlit-pydantic` (or similar schema-driven form generation) before
+      hand-rolling a bespoke form per config file — the configs are already pydantic models
+      (`BudgetConfig` etc.), so a schema-driven renderer avoids 5 one-off forms. Keep
+      `write_config_file`'s whole-config re-validation as the backend safety net regardless of
+      what renders the input widgets.
 
 **CLI polish** (pre-existing gap, affects both cascades — not scoped to any one phase):
 

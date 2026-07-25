@@ -53,6 +53,10 @@
 - [ ] Trend and anomaly callouts on the dashboard
 
 ## 8. Automation & polish
+- [ ] Dashboard filters/slicers (month range, category, account) across Overview/Sunburst/Sankey/Budgets
+- [ ] Inline review-queue labeling: category dropdown (existing taxonomy + "add new") per row, no manual ID entry
+- [ ] Config editor as structured per-field forms (select/number/list add-delete) instead of raw YAML text,
+      validated client-side before hitting `write_config_file`'s whole-config re-validation
 - [ ] Dagster orchestration: asset graph over dlt sources + dbt models, scheduled runs
 - [ ] Email receipt ingestion (IMAP, local parsing)
 - [ ] Optional: SimpleFIN Bridge for automatic bank sync

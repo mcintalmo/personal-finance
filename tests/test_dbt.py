@@ -2158,3 +2158,98 @@ class TestGoldBudgetActuals:
                 {"category_id": category_id, "period_start": period_start},
             ).fetchone()
         assert reported == expected
+
+
+@pytest.fixture(scope="module")
+def recurring_warehouse(tmp_path_factory):
+    """A seeded warehouse with 6 months of synth activity (enough occurrences
+    for gold_recurring_expenses' >= 3-occurrence heuristic to fire on the
+    fixture's monthly rent/subscription charges), with dbt build run once."""
+    root = tmp_path_factory.mktemp("wh")
+    warehouse = root / "warehouse.duckdb"
+    bronze = root / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    with duckdb.connect(str(warehouse)) as conn:
+        create_schema(conn)
+        seed_categories(conn, config.taxonomy)
+        seed_rules(conn, config.rules)
+        seed_merchant_aliases(conn, config.merchant_aliases)
+
+    exports = root / "exports"
+    write_scenario(generate_scenario(seed=42, months=6), exports)
+    sources = {s.name: s for s in config.sources}
+    for name, filename in _BRONZE_SOURCES:
+        run_ingestion(sources[name], exports / filename, bronze)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    json.dumps({"known_cities": config.known_cities}),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+class TestGoldRecurringExpenses:
+    def test_detects_known_subscriptions_and_rent(self, recurring_warehouse):
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            rows = conn.execute(
+                "select merchant_name, amount, cadence, occurrence_count "
+                "from main_gold.gold_recurring_expenses "
+                "where merchant_name in ('NETFLIX', 'SPOTIFY', 'CITYLINE APARTMENTS RENT')"
+            ).fetchall()
+        found = {name: (amount, cadence, count) for name, amount, cadence, count in rows}
+        # normalize_merchant strips "NETFLIX.COM" -> "NETFLIX" and "SPOTIFY USA" -> "SPOTIFY"
+        # (domain suffix / trailing state, respectively) — see transform/macros/normalize_merchant.sql.
+        assert found["NETFLIX"] == (Decimal("15.49"), "monthly", 6)
+        assert found["SPOTIFY"] == (Decimal("11.99"), "monthly", 6)
+        assert found["CITYLINE APARTMENTS RENT"] == (Decimal("1800.00"), "monthly", 6)
+
+    def test_excludes_random_one_off_spend(self, recurring_warehouse):
+        # Groceries/gas/dining/Amazon are random-amount, random-occurrence spend
+        # in the synth scenario — none of it should clear the >= 3-occurrences,
+        # regular-cadence bar. Only the three fixed-amount monthly charges should.
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            (merchant_names,) = conn.execute(
+                "select list(distinct merchant_name) from main_gold.gold_recurring_expenses"
+            ).fetchone()
+        assert set(merchant_names) == {"NETFLIX", "SPOTIFY", "CITYLINE APARTMENTS RENT"}
+
+    def test_excludes_transfers_and_income(self, recurring_warehouse):
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            (payroll_count,) = conn.execute(
+                "select count(*) from main_gold.gold_recurring_expenses "
+                "where merchant_name = 'ACME CORP PAYROLL'"
+            ).fetchone()
+            (card_payment_count,) = conn.execute(
+                "select count(*) from main_gold.gold_recurring_expenses "
+                "where merchant_name like '%CREDIT CRD AUTOPAY%'"
+            ).fetchone()
+        assert payroll_count == 0  # inflow, not an expense
+        assert card_payment_count == 0  # transfer leg, excluded via is_transfer
+
+    def test_amount_is_positive_and_cadence_is_regular(self, recurring_warehouse):
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            rows = conn.execute(
+                "select amount, avg_gap_days, gap_days_stddev from main_gold.gold_recurring_expenses"
+            ).fetchall()
+        assert rows
+        for amount, avg_gap_days, gap_days_stddev in rows:
+            assert amount > 0
+            assert gap_days_stddev <= avg_gap_days * 0.25
