@@ -37,9 +37,11 @@ rules as (
     select * from {{ source('app', 'rules') }}
 ),
 
--- applies_to is validated (Python RuleConfig) against a fixed enum matching
--- these four branches, so the union is exhaustive by construction — see
--- personal_finance.user_config.RuleApplyField.
+-- applies_to is validated (Python RuleConfig) against a fixed enum — see
+-- personal_finance.user_config.RuleApplyField. Its four transaction-field
+-- values are exhaustively covered by these four branches; its one
+-- split-field value (product_name) is exhaustively covered instead by
+-- silver_split_categories.sql, not by this model.
 candidates as (
     select t.transaction_id, r.id as rule_id, r.category_id, r.pattern, r.priority,
         t.description_raw as matched_field

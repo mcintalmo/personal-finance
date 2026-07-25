@@ -1520,6 +1520,31 @@ class TestSilverAmazonSplits:
             ).fetchone()
         assert count == len(orders) > 0
 
+    def test_proportional_allocation_rounds_half_cent_boundary_correctly(self):
+        # Regression guard for a real bug found in review: `charge * item /
+        # shipment` can land exactly on a half-cent boundary (185.64 * 3.72 /
+        # 5.44 = 126.945 exactly), where DOUBLE/DECIMAL division rounds the
+        # wrong way due to binary floating-point approximation (it produced
+        # 126.94, not the correct 126.95) — even though the model's overall
+        # sum-to-transaction-amount invariant still held, since the remainder
+        # step absorbs any per-item error into the last item. This runs the
+        # model's exact integer-cents formula directly (not the full dbt
+        # build) against that adversarial input.
+        with duckdb.connect() as conn:
+            (rounded_cents,) = conn.execute(
+                """
+                with cents as (
+                    select
+                        cast(round(185.64 * 100) as bigint) as charge_cents,
+                        cast(round(3.72 * 100) as bigint) as item_cents,
+                        cast(round(5.44 * 100) as bigint) as shipment_cents
+                )
+                select (charge_cents * item_cents + shipment_cents // 2) // shipment_cents
+                from cents
+                """
+            ).fetchone()
+        assert rounded_cents == 12695  # $126.95, not $126.94
+
     def test_splits_sum_to_exact_transaction_amount(self, amazon_warehouse):
         warehouse, _scenario, _orders = amazon_warehouse
         with duckdb.connect(str(warehouse)) as conn:
