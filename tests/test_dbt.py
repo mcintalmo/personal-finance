@@ -8,18 +8,25 @@ CI fails.
 
 import json
 import warnings
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
 import pytest
 
+from personal_finance.callouts import (
+    _NEXT_FORECAST_SQL,
+    CalloutKind,
+    ForecastRow,
+    detect_callouts,
+)
 from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id, product_embedding_id
-from personal_finance.forecast import compute_forecasts
+from personal_finance.forecast import compute_forecasts, load_series
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id, product_llm_category_id
+from personal_finance.models import ForecastSeriesKind
 from personal_finance.seed import seed_budgets, seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.synth import (
     generate_amazon_orders,
@@ -2165,8 +2172,9 @@ class TestGoldBudgetActuals:
 @pytest.fixture(scope="module")
 def recurring_warehouse(tmp_path_factory):
     """A seeded warehouse with 6 months of synth activity (enough occurrences
-    for gold_recurring_expenses' >= 3-occurrence heuristic to fire on the
-    fixture's monthly rent/subscription charges), with dbt build run once."""
+    for gold_recurring_flows' >= 3-occurrence heuristic to fire on the
+    fixture's monthly rent/subscription charges and semi-monthly payroll),
+    with dbt build run once."""
     root = tmp_path_factory.mktemp("wh")
     warehouse = root / "warehouse.duckdb"
     bronze = root / "bronze"
@@ -2208,12 +2216,12 @@ def recurring_warehouse(tmp_path_factory):
     return warehouse
 
 
-class TestGoldRecurringExpenses:
+class TestGoldRecurringFlows:
     def test_detects_known_subscriptions_and_rent(self, recurring_warehouse):
         with duckdb.connect(str(recurring_warehouse)) as conn:
             rows = conn.execute(
                 "select merchant_name, amount, cadence, occurrence_count "
-                "from main_gold.gold_recurring_expenses "
+                "from main_gold.gold_recurring_flows "
                 "where merchant_name in ('NETFLIX', 'SPOTIFY', 'CITYLINE APARTMENTS RENT')"
             ).fetchall()
         found = {name: (amount, cadence, count) for name, amount, cadence, count in rows}
@@ -2223,37 +2231,65 @@ class TestGoldRecurringExpenses:
         assert found["SPOTIFY"] == (Decimal("11.99"), "monthly", 6)
         assert found["CITYLINE APARTMENTS RENT"] == (Decimal("1800.00"), "monthly", 6)
 
+    def test_detects_recurring_income(self, recurring_warehouse):
+        # The synth scenario pays $2,500 on the 1st and the 15th, so gaps
+        # alternate 14 and 16-17 days — an average of ~15, which lands in the
+        # biweekly bucket. This is the case the biweekly range exists for:
+        # without it the paycheck falls between the weekly and monthly ranges
+        # and the most predictable flow in the ledger goes undetected.
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            row = conn.execute(
+                "select flow, amount, cadence, occurrence_count, avg_gap_days "
+                "from main_gold.gold_recurring_flows "
+                "where merchant_name = 'ACME CORP PAYROLL'"
+            ).fetchone()
+        assert row is not None, "semi-monthly payroll should be detected as recurring income"
+        flow, amount, cadence, count, avg_gap_days = row
+        assert flow == "inflow"
+        assert amount == Decimal("2500.00")
+        assert cadence == "biweekly"
+        assert count == 12  # two paydays a month over six months
+        assert 12 <= avg_gap_days <= 16
+
     def test_excludes_random_one_off_spend(self, recurring_warehouse):
         # Groceries/gas/dining/Amazon are random-amount, random-occurrence spend
         # in the synth scenario — none of it should clear the >= 3-occurrences,
-        # regular-cadence bar. Only the three fixed-amount monthly charges should.
+        # regular-cadence bar. Only the fixed-amount monthly charges and the
+        # semi-monthly paycheck should.
         with duckdb.connect(str(recurring_warehouse)) as conn:
             (merchant_names,) = conn.execute(
-                "select list(distinct merchant_name) from main_gold.gold_recurring_expenses"
+                "select list(distinct merchant_name) from main_gold.gold_recurring_flows"
             ).fetchone()
-        assert set(merchant_names) == {"NETFLIX", "SPOTIFY", "CITYLINE APARTMENTS RENT"}
+        assert set(merchant_names) == {
+            "NETFLIX",
+            "SPOTIFY",
+            "CITYLINE APARTMENTS RENT",
+            "ACME CORP PAYROLL",
+        }
 
-    def test_excludes_transfers_and_income(self, recurring_warehouse):
+    def test_excludes_transfers(self, recurring_warehouse):
+        # The card-autopay pair is a fixed-cadence, same-amount movement and
+        # would otherwise be the most "recurring" thing in the ledger — but
+        # it is money moving between the user's own accounts, not a flow.
         with duckdb.connect(str(recurring_warehouse)) as conn:
-            (payroll_count,) = conn.execute(
-                "select count(*) from main_gold.gold_recurring_expenses "
-                "where merchant_name = 'ACME CORP PAYROLL'"
-            ).fetchone()
             (card_payment_count,) = conn.execute(
-                "select count(*) from main_gold.gold_recurring_expenses "
+                "select count(*) from main_gold.gold_recurring_flows "
                 "where merchant_name like '%CREDIT CRD AUTOPAY%'"
             ).fetchone()
-        assert payroll_count == 0  # inflow, not an expense
-        assert card_payment_count == 0  # transfer leg, excluded via is_transfer
+        assert card_payment_count == 0
 
     def test_amount_is_positive_and_cadence_is_regular(self, recurring_warehouse):
         with duckdb.connect(str(recurring_warehouse)) as conn:
             rows = conn.execute(
-                "select amount, avg_gap_days, gap_days_stddev from main_gold.gold_recurring_expenses"
+                "select flow, amount, avg_gap_days, gap_days_stddev "
+                "from main_gold.gold_recurring_flows"
             ).fetchall()
         assert rows
-        for amount, avg_gap_days, gap_days_stddev in rows:
+        for flow, amount, avg_gap_days, gap_days_stddev in rows:
+            # Published as a magnitude regardless of direction — `flow` carries
+            # the sign, so a consumer never has to guess at the convention.
             assert amount > 0
+            assert flow in {"inflow", "outflow"}
             assert gap_days_stddev <= avg_gap_days * 0.25
 
 
@@ -2304,7 +2340,7 @@ def forecast_warehouse(tmp_path_factory):
                 "--vars",
                 json.dumps({"known_cities": config.known_cities}),
             ]
-            assert dbtRunner().invoke(args).success  # silver/gold, incl. recurring expenses
+            assert dbtRunner().invoke(args).success  # silver/gold, incl. recurring flows
             with duckdb.connect(str(warehouse)) as conn:
                 # Fixed `today` keeps trained_through pinned to 2026-06 instead
                 # of drifting with the wall clock.
@@ -2355,6 +2391,54 @@ class TestGoldForecasts:
         # CITYLINE RENT 1800.00 + NETFLIX 15.49 + SPOTIFY 11.99
         assert committed == Decimal("1827.48")
 
+    def test_recurring_income_lands_in_the_committed_component(self, forecast_warehouse):
+        """The inflow half of the same property. The synth scenario pays
+        $2,500 on the 1st and the 15th, so once recurring detection covers
+        inflows, income is almost entirely committed — and the model is left
+        predicting only what varies instead of re-deriving a known salary.
+        """
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select committed_amount from main_gold.gold_forecasts "
+                "where series_key = 'total_inflow' order by horizon"
+            ).fetchall()
+        assert rows
+        # Two $2,500 paydays projected into each forecast month.
+        assert [committed for (committed,) in rows] == [Decimal("5000.00")] * len(rows)
+
+    def test_recurring_income_is_removed_from_the_variable_series(self, forecast_warehouse):
+        """The other half of the decomposition, and the one nothing guarded.
+
+        `test_recurring_income_lands_in_the_committed_component` reads
+        committed_amount, which comes from projecting the recurring groups —
+        entirely independent of the SQL that splits the *history* into its
+        committed and variable halves. If that split regressed to matching
+        outflows only, the salary would be projected as committed AND left in
+        the variable series for the model to re-fit, and income would forecast
+        at roughly double. Every other test in this class still passes then,
+        including the components-sum invariant, which holds fine at twice the
+        right value.
+        """
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select variable_amount, predicted_amount from main_gold.gold_forecasts "
+                "where series_key = 'total_inflow'"
+            ).fetchall()
+            (typical,) = conn.execute(
+                "select median(total_inflow) from main_gold.gold_monthly_flow "
+                "where month < date_trunc('month', date '2026-07-15')"
+            ).fetchone()
+        assert rows
+        for variable, predicted in rows:
+            # Payroll is $5,000/month of the ~$5,100 that actually arrives, so
+            # only the small non-salary tail is left to model.
+            assert variable < Decimal("1000.00"), "salary was left in the variable series"
+            assert abs(predicted - typical) < Decimal("1000.00"), (
+                f"predicted {predicted} is implausible against a typical {typical}"
+            )
+
     def test_fully_recurring_category_gets_a_zero_width_interval(self, forecast_warehouse):
         """The property the decomposition exists for: the Streaming budget is
         100% subscriptions, so there is nothing uncertain left to widen it."""
@@ -2400,3 +2484,127 @@ class TestGoldForecasts:
             (total,) = conn.execute("select count(*) from forecasts").fetchone()
         assert again == written
         assert total == written
+
+
+class TestCalloutsOverRealMarts:
+    """`detect_callouts` reuses `forecast.load_series`, so it depends on the
+    same gold SQL. The statistical decisions are unit-tested in
+    test_callouts.py; what this class proves is that the queries run against a
+    real warehouse and that the feed refers to series that actually exist.
+    """
+
+    def test_produces_a_feed_from_the_marts(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+        assert feed.forecasts_available is True
+        # Non-empty is the load-bearing part: without it every per-callout
+        # assertion below iterates an empty list and passes vacuously, which
+        # would keep the whole feed green if it silently produced nothing.
+        assert feed.callouts, "18 months of synth activity should yield something to say"
+        for callout in feed.callouts:
+            assert callout.title
+            assert callout.detail
+            assert callout.series_key
+
+    def test_series_totals_feed_the_anomaly_detector_at_the_right_grain(self, forecast_warehouse):
+        """Anomalies key off `SeriesHistory.totals`, and every unit test for
+        them builds that history by hand. This is the only check that the real
+        `load_series` produces it at the right grain and sign — if it returned
+        net amounts, half-months, or negated outflows, the hand-built unit
+        tests would all still pass while every real callout was nonsense.
+        """
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            histories = {h.key: h for h in load_series(conn, date(2026, 6, 1))}
+            mart = dict(
+                conn.execute(
+                    "select month, total_outflow from main_gold.gold_monthly_flow "
+                    "where month <= date '2026-06-01' order by month"
+                ).fetchall()
+            )
+        spend = histories["total_outflow"]
+        assert spend.months[-1] == date(2026, 6, 1)  # the partial month is excluded
+        for month, total in zip(spend.months, spend.totals, strict=True):
+            assert total == pytest.approx(float(mart[datetime(month.year, month.month, 1)]))
+
+    def test_budgets_are_joined_onto_their_forecast_rows(self, forecast_warehouse):
+        """The LEFT JOIN in _NEXT_FORECAST_SQL is the only thing that makes a
+        BUDGET_RISK callout reachable at all. If it matched nothing, that whole
+        kind would be dead code — and if its `series_kind` predicate migrated
+        from the ON clause to a WHERE, the join would quietly become an INNER
+        one and drop both total series from the feed. Neither shows up as a
+        failure anywhere else.
+        """
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = [
+                ForecastRow(*r)
+                for r in conn.execute(
+                    _NEXT_FORECAST_SQL, {"current_month": date(2026, 7, 1)}
+                ).fetchall()
+            ]
+        budget_rows = [r for r in rows if r.series_kind == "budget_category"]
+        assert budget_rows
+        assert all(r.budgeted_amount is not None for r in budget_rows)
+        assert all(r.budget_period is not None for r in budget_rows)
+        # The totals must survive the LEFT JOIN carrying NULL budgets.
+        assert {"total_inflow", "total_outflow"} <= {r.series_key for r in rows}
+        assert all(r.budgeted_amount is None for r in rows if r.series_kind.startswith("total_"))
+
+    def test_every_callout_names_a_real_series(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+            known = {
+                key
+                for (key,) in conn.execute(
+                    "select distinct series_key from main_gold.gold_forecasts"
+                ).fetchall()
+            }
+        assert {c.series_key for c in feed.callouts} <= known
+
+    def test_budget_risk_callouts_only_target_budgeted_series(self, forecast_warehouse):
+        """A budget-risk callout on a total would be comparing a whole month's
+        spend to one category's cap."""
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+        for callout in feed.callouts:
+            if callout.kind is CalloutKind.BUDGET_RISK:
+                assert callout.series_kind is ForecastSeriesKind.BUDGET_CATEGORY
+
+    def test_a_forecast_whose_months_have_all_passed_is_not_used(self, forecast_warehouse):
+        """`pf forecast` is run by hand, so its rows can be months old.
+
+        The fixture forecasts 2026-07 through 2026-09. Viewed from December,
+        every one of those months has ended. Selecting `horizon = 1` blindly
+        would nudge the user about July — a month they can no longer change,
+        presented as though it were current. The rows drop out instead and the
+        feed reports that no usable forecast exists, which sends the user to
+        re-run `pf forecast` rather than acting on stale numbers.
+        """
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            current = detect_callouts(conn, today=date(2026, 7, 15))
+            stale = detect_callouts(conn, today=date(2026, 12, 15))
+        assert current.forecasts_available is True
+        assert stale.forecasts_available is False
+        assert all(
+            c.kind not in {CalloutKind.TREND, CalloutKind.BUDGET_RISK} for c in stale.callouts
+        )
+
+    def test_reports_no_forecasts_when_none_have_been_computed(self, recurring_warehouse):
+        """The other fixture never runs `pf forecast`, so the trend half of
+        the feed is unavailable and has to say so.
+
+        Note this fixture yields no callouts at all (6 months of unremarkable
+        synth activity), so the kind assertion below is deliberately weak —
+        `forecasts_available` is the claim being tested. The anomaly path
+        itself is covered by `test_series_totals_feed_the_anomaly_detector_at_
+        the_right_grain` plus the unit tests in test_callouts.py.
+        """
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+        assert feed.forecasts_available is False
+        assert all(c.kind in {CalloutKind.SPIKE, CalloutKind.DIP} for c in feed.callouts)

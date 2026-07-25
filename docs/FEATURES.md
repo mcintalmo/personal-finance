@@ -48,9 +48,9 @@
 
 ## 7. Intelligence
 - [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
-- [ ] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence)
+- [ ] Recurring-flow detection, inflow and outflow (heuristic dbt model: merchant + amount + cadence)
 - [ ] Forecasting of spend/income (statsmodels: Theta/ETS over a committed+variable decomposition)
-- [ ] Trend and anomaly callouts on the dashboard
+- [ ] Trend and anomaly callouts on the dashboard (modified z-score anomalies, forecast trends, budget risk)
 
 ## 8. Automation & polish
 - [ ] Dashboard filters/slicers (month range, category, account) across Overview/Sunburst/Sankey/Budgets

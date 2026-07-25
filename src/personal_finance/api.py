@@ -21,6 +21,7 @@ import duckdb
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from personal_finance.callouts import CalloutFeed, detect_callouts
 from personal_finance.config import get_settings
 from personal_finance.exceptions import ConfigurationError, NotFoundError
 from personal_finance.llm_categorize import fetch_category_paths
@@ -71,8 +72,12 @@ def _require_table_built(conn: duckdb.DuckDBPyConnection, schema: str, table: st
         {"schema": schema, "table": table},
     ).fetchone()
     if not result or not result[0]:
+        # Name the table: a user whose `pf transform` partially failed has
+        # already run the suggested command, and "run it again" tells them
+        # nothing about which model is actually missing.
         raise HTTPException(
-            status_code=503, detail="dbt models have not been built yet — run `pf transform` first."
+            status_code=503,
+            detail=f"{schema}.{table} has not been built yet — run `pf transform` first.",
         )
 
 
@@ -237,6 +242,21 @@ def budgets(conn: Conn) -> list[BudgetActual]:
         )
         for row in rows
     ]
+
+
+@app.get("/callouts")
+def callouts(conn: Conn, limit: int | None = None) -> CalloutFeed:
+    """Ranked trend/anomaly observations, computed on demand.
+
+    Needs the same gold models the forecaster reads, since it reuses
+    `forecast.load_series` for the monthly histories rather than
+    re-deriving them.
+    """
+    _require_gold_built(conn)
+    _require_table_built(conn, "main_gold", "gold_recurring_flows")
+    _require_table_built(conn, "main_gold", "gold_line_items")
+    _require_table_built(conn, "main_gold", "gold_category_ancestors")
+    return detect_callouts(conn, limit=limit)
 
 
 class TransactionReviewItem(BaseModel):

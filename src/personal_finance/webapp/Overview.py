@@ -6,12 +6,26 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from personal_finance.webapp._client import get
+from personal_finance.webapp._client import get, get_optional
 
 st.set_page_config(page_title="Overview — personal-finance", page_icon="\U0001f4b0", layout="wide")
 st.title("Overview")
 
 overview = get("/overview")
+
+# The three most notable callouts, above the charts — the point of a callout
+# is that the user sees it without going looking. The Callouts page has the
+# full ranked list and the per-kind filters.
+feed = get_optional("/callouts", limit=3)
+LEVEL_WIDGETS = {"critical": st.error, "warning": st.warning, "info": st.info}
+callouts = feed["callouts"] if feed else []
+for callout in callouts:
+    LEVEL_WIDGETS.get(callout["level"], st.info)(f"**{callout['title']}** — {callout['detail']}")
+# Linked whenever the feed came back at all, not only when it had something to
+# say: if the band is empty because the request failed, the Callouts page is
+# where the real error is visible, so removing the route would hide it.
+if feed is not None:
+    st.page_link("pages/6_Callouts.py", label="See all callouts", icon="\U0001f514")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total inflow", f"${overview['total_inflow']:,.2f}")

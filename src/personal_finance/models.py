@@ -82,6 +82,21 @@ class BudgetPeriod(StrEnum):
     YEARLY = "yearly"
 
 
+class Flow(StrEnum):
+    """Which direction money moved, matching silver_transactions.flow.
+
+    A closed set that dbt derives from the sign of the amount and guards with
+    an `accepted_values` test. Parsed into this enum on the way out of the
+    warehouse so an unexpected value fails at the row that is wrong: code that
+    partitions on flow (see forecast.load_series) would otherwise drop an
+    unrecognized group from *both* halves, and money silently going missing
+    from a forecast is invisible to every downstream invariant.
+    """
+
+    INFLOW = "inflow"
+    OUTFLOW = "outflow"
+
+
 class ForecastSeriesKind(StrEnum):
     """Which kind of series a forecast row belongs to."""
 
@@ -321,9 +336,10 @@ class Forecast(Entity):
 
     ``predicted_amount`` is always ``committed_amount + variable_amount``:
 
-    * **committed** — recurring charges due that month (rent, subscriptions),
-      projected forward deterministically from ``gold_recurring_expenses`` on
-      each group's own observed cadence. Known, not estimated.
+    * **committed** — recurring flows due that month (rent and subscriptions
+      for a spend series, salary for the income one), projected forward
+      deterministically from ``gold_recurring_flows`` on each group's own
+      observed cadence. Known, not estimated.
     * **variable** — everything else, from a statistical model fit to the
       history with the committed component removed.
 

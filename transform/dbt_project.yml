@@ -32,11 +32,15 @@ vars:
   # empty by default so a config-free build is a no-op here, same as every
   # other cascade stage.
   known_cities: []
-  # Recurring-expense detection (gold_recurring_expenses): the average gap
-  # (in days) between same-merchant, same-amount charges must fall in one of
-  # these [min, max] ranges to be bucketed into that cadence; outside all of
-  # them, the group isn't classified as recurring at all.
+  # Recurring-flow detection (gold_recurring_flows): the average gap (in days)
+  # between same-merchant, same-amount transactions must fall in one of these
+  # [min, max] ranges to be bucketed into that cadence; outside all of them,
+  # the group isn't classified as recurring at all. Applies to inflows and
+  # outflows alike. The biweekly range covers fortnightly paychecks, which sit
+  # at ~14 days — between the weekly and monthly buckets, so without it the
+  # commonest salary cadence is never detected.
   recurring_weekly_gap_days: [5, 9]
+  recurring_biweekly_gap_days: [12, 16]
   recurring_monthly_gap_days: [25, 35]
   recurring_quarterly_gap_days: [80, 100]
   recurring_yearly_gap_days: [350, 380]

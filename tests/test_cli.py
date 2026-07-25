@@ -34,8 +34,27 @@ def test_help_lists_commands():
         "enrich",
         "classify",
         "review",
+        "forecast",
+        "callouts",
     ):
         assert command in result.output
+
+
+class TestCallouts:
+    def test_exits_cleanly_without_a_warehouse(self):
+        """`pf callouts` is the first thing a curious user tries; a raw
+        DuckDB IOException instead of "run `pf init-db`" is a bad first
+        impression and tells them nothing about what to do."""
+        result = runner.invoke(app, ["callouts"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
+
+    def test_exits_cleanly_before_transform(self, tmp_path):
+        init = runner.invoke(app, ["init-db", "--config-dir", str(tmp_path / "config")])
+        assert init.exit_code == 0, init.output
+        result = runner.invoke(app, ["callouts"])
+        assert result.exit_code == 1
+        assert "pf transform" in result.output
 
 
 class TestSynth:

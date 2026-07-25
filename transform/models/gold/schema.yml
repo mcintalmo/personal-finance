@@ -124,36 +124,44 @@ models:
       - name: actual_outflow
         data_tests: [not_null]
 
-  - name: gold_recurring_expenses
+  - name: gold_recurring_flows
     description: >-
-      Heuristically detected recurring charges: one row per (merchant_name,
-      amount) pair of outflows that repeat at a regular weekly/monthly/
-      quarterly/yearly cadence (rent, subscriptions, ...). A merchant charged
-      the same amount only once or twice, or at irregular intervals, has no
-      row here. Phase 7 (Intelligence).
+      Heuristically detected recurring money movements: one row per
+      (merchant_name, signed amount) pair that repeats at a regular
+      weekly/biweekly/monthly/quarterly/yearly cadence. Covers both
+      directions — outflows (rent, subscriptions) and inflows (salary,
+      pension). A merchant seen at the same amount only once or twice, or at
+      irregular intervals, has no row here. Phase 7 (Intelligence).
     columns:
-      - name: recurring_expense_id
+      - name: recurring_flow_id
         data_tests: [unique, not_null]
       - name: merchant_name
         data_tests: [not_null]
+      - name: flow
+        description: Which way the money moved; the sign `amount` was stripped of.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [inflow, outflow]
       - name: amount
-        description: Positive charge magnitude (outflow), matching gold_monthly_flow's sign convention.
+        description: Positive magnitude, matching gold_monthly_flow's sign convention.
         data_tests: [not_null]
       - name: cadence
         data_tests:
           - not_null
           - accepted_values:
               arguments:
-                values: [weekly, monthly, quarterly, yearly]
+                values: [weekly, biweekly, monthly, quarterly, yearly]
       - name: occurrence_count
-        description: Number of charges observed; always >= 3 by construction.
+        description: Number of occurrences observed; always >= 3 by construction.
         data_tests: [not_null]
       - name: first_seen_on
         data_tests: [not_null]
       - name: last_seen_on
         data_tests: [not_null]
       - name: avg_gap_days
-        description: Average days between consecutive charges; the value cadence is bucketed from.
+        description: Average days between consecutive occurrences; the value cadence is bucketed from.
         data_tests: [not_null]
       - name: gap_days_stddev
         description: Population stddev of the gaps; always <= avg_gap_days * recurring_regularity_threshold.
@@ -195,9 +203,9 @@ models:
         data_tests: [not_null]
       - name: committed_amount
         description: >-
-          Recurring charges falling in that month, projected forward on each detected
-          group's own cadence. Always 0 for total_inflow: recurring detection covers
-          outflows only, so income is modelled in full.
+          Recurring flows falling in that month, projected forward on each detected
+          group's own cadence — recurring charges for the spend series, recurring
+          income (salary, pension) for total_inflow.
         data_tests: [not_null]
       - name: variable_amount
         description: The statistically modelled, non-recurring component.

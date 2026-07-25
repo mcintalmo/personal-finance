@@ -1,9 +1,10 @@
 """Generate a coherent synthetic financial life.
 
 One scenario = three accounts (checking, credit card, Venmo) with a few months
-of correlated activity: biweekly payroll, monthly rent and subscriptions,
-random grocery/gas/dining spend on the card, a monthly card payment from
-checking, and Venmo payments that periodically cash out to checking.
+of correlated activity: semi-monthly payroll (the 1st and the 15th), monthly
+rent and subscriptions, random grocery/gas/dining spend on the card, a monthly
+card payment from checking, and Venmo payments that periodically cash out to
+checking.
 
 The correlated pairs are deliberate: the Venmo cash-out (-X on Venmo, +X in
 checking, same day) and the card payment (-X checking, +X card) are the fixture
