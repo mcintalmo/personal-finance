@@ -3,10 +3,11 @@
 Stages 1-3 (rules, embedding similarity, local-LLM fallback) each decline to
 guess when unsure rather than risk a wrong categorization — what's left after
 all three is the genuinely ambiguous tail this module surfaces for a human to
-resolve. A correction is stored as a :class:`~personal_finance.models.Label`
-(``subject_kind=transaction``), which outranks every automated stage once
-`pf transform` re-runs — see ``silver_transaction_categories_all``, where the
-human stage is unioned first and every other stage excludes what it covers.
+resolve, for both transactions and (Amazon) line-item splits. A correction is
+stored as a :class:`~personal_finance.models.Label`, which outranks every
+automated stage once `pf transform` re-runs — see
+``silver_transaction_categories_all``/``silver_split_categories_all``, where
+the human stage is unioned first and every other stage excludes what it covers.
 """
 
 from dataclasses import dataclass
@@ -21,6 +22,18 @@ if TYPE_CHECKING:
 
     import duckdb
 
+# Which silver table/id-column a subject_kind's rows live in — used by
+# record_label to validate a subject_id exists before storing a correction
+# for it. Only kinds a human can actually label belong here (not DOCUMENT).
+_SUBJECT_TABLES: dict[EntityKind, str] = {
+    EntityKind.TRANSACTION: "main_silver.silver_transactions",
+    EntityKind.SPLIT: "main_silver.silver_amazon_splits",
+}
+_SUBJECT_ID_COLUMNS: dict[EntityKind, str] = {
+    EntityKind.TRANSACTION: "transaction_id",
+    EntityKind.SPLIT: "split_id",
+}
+
 
 @dataclass
 class ReviewItem:
@@ -32,6 +45,18 @@ class ReviewItem:
     merchant_name: str | None
     description_raw: str
     source: str
+
+
+@dataclass
+class SplitReviewItem:
+    """One line-item split the split-categorization cascade could not confidently place."""
+
+    split_id: str
+    transaction_id: str
+    asin: str
+    product_name: str
+    amount: Decimal
+    quantity: int
 
 
 def fetch_review_queue(conn: duckdb.DuckDBPyConnection, *, limit: int = 20) -> list[ReviewItem]:
@@ -55,15 +80,40 @@ def fetch_review_queue(conn: duckdb.DuckDBPyConnection, *, limit: int = 20) -> l
     return [ReviewItem(*row) for row in rows]
 
 
+def fetch_split_review_queue(
+    conn: duckdb.DuckDBPyConnection, *, limit: int = 20
+) -> list[SplitReviewItem]:
+    """Return up to `limit` splits absent from every split-cascade stage.
+
+    Reads ``main_silver.silver_amazon_splits`` / ``silver_split_categories_all``
+    — `pf transform` must have run at least once. Ordered by split_id (a
+    split has no posted_on of its own the way a transaction does).
+    """
+    rows = conn.execute(
+        """
+        SELECT split_id, transaction_id, asin, product_name, amount, quantity
+        FROM main_silver.silver_amazon_splits
+        WHERE split_id NOT IN (
+            SELECT split_id FROM main_silver.silver_split_categories_all
+        )
+        ORDER BY split_id
+        LIMIT $limit
+        """,
+        {"limit": limit},
+    ).fetchall()
+    return [SplitReviewItem(*row) for row in rows]
+
+
 def record_label(
     conn: duckdb.DuckDBPyConnection,
-    transaction_id: str,
+    subject_id: str,
     category_path: str,
     category_paths: dict[str, str],
     *,
+    subject_kind: EntityKind = EntityKind.TRANSACTION,
     note: str | None = None,
 ) -> Label:
-    """Store a human category correction for one transaction.
+    """Store a human category correction for one transaction or split.
 
     ``category_paths`` is the ``{path: category_id}`` map from
     :func:`personal_finance.llm_categorize.fetch_category_paths` — passed in
@@ -71,23 +121,27 @@ def record_label(
     recursive taxonomy query once.
 
     Raises:
-        NotFoundError: `transaction_id` isn't a real silver transaction, or
-            `category_path` isn't in the taxonomy.
+        NotFoundError: `subject_id` isn't a real silver transaction/split for
+            `subject_kind`, or `category_path` isn't in the taxonomy.
     """
     if category_path not in category_paths:
         msg = f"Unknown category path {category_path!r}. Known paths: {sorted(category_paths)}"
         raise NotFoundError(msg)
+    # table/id_column come from the fixed internal dicts above, keyed by the
+    # EntityKind enum — never user input, so splicing them into SQL is safe.
+    table = _SUBJECT_TABLES[subject_kind]
+    id_column = _SUBJECT_ID_COLUMNS[subject_kind]
     result = conn.execute(
-        "SELECT count(*) FROM main_silver.silver_transactions WHERE transaction_id = $id",
-        {"id": transaction_id},
+        f"SELECT count(*) FROM {table} WHERE {id_column} = $id",
+        {"id": subject_id},
     ).fetchone()
     if not result or not result[0]:
-        msg = f"No such transaction: {transaction_id!r}"
+        msg = f"No such {subject_kind.value}: {subject_id!r}"
         raise NotFoundError(msg)
 
     label = Label(
-        subject_kind=EntityKind.TRANSACTION,
-        subject_id=transaction_id,
+        subject_kind=subject_kind,
+        subject_id=subject_id,
         category_id=category_paths[category_path],
         note=note,
     )

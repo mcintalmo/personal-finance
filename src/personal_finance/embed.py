@@ -19,7 +19,7 @@ from uuid import NAMESPACE_URL, uuid5
 import httpx
 
 from personal_finance.exceptions import ExternalServiceError
-from personal_finance.models import MerchantEmbedding
+from personal_finance.models import MerchantEmbedding, ProductEmbedding
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -166,4 +166,67 @@ def compute_missing_embeddings(
                 embedding=vector,
             )
             conn.execute(_UPSERT_EMBEDDING, embedding.model_dump())
+    return len(names)
+
+
+def product_embedding_id(product_name: str, model: str) -> str:
+    """Return the deterministic id for one (product_name, model) embedding.
+
+    Same purpose as :func:`merchant_embedding_id`, kept in its own namespace/
+    cache table (``product_embeddings``) since a product name and a merchant
+    name are different vocabularies — comparing one's embedding against the
+    other's reference set would be a nonsensical nearest-neighbor match.
+    """
+    return uuid5(NAMESPACE_URL, f"personal-finance:product_embedding:{model}:{product_name}").hex
+
+
+_UPSERT_PRODUCT_EMBEDDING = """
+INSERT INTO product_embeddings (id, created_at, product_name, model, embedding, note)
+VALUES ($id, $created_at, $product_name, $model, $embedding, $note)
+ON CONFLICT (id) DO UPDATE SET embedding = excluded.embedding
+"""
+
+
+def compute_missing_product_embeddings(
+    conn: duckdb.DuckDBPyConnection,
+    client: EmbeddingClient,
+    model: str,
+    *,
+    chunk_size: int = 128,
+) -> int:
+    """Embed every distinct split product_name not yet cached for ``model``.
+
+    The split-categorization cascade's analog of :func:`compute_missing_embeddings`.
+    Reads ``main_silver.silver_amazon_splits.product_name`` — the dbt build
+    must have run at least once (``pf transform``) before this can see any
+    splits; a warehouse with no Amazon data ingested yet resolves to zero
+    rows here, same as the merchant version resolves to zero rows before any
+    bank source is ingested.
+
+    Returns:
+        How many products were newly embedded (0 if all were already cached).
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT product_name
+        FROM main_silver.silver_amazon_splits
+        WHERE product_name NOT IN (
+            SELECT product_name FROM product_embeddings WHERE model = $model
+        )
+        ORDER BY product_name
+        """,
+        {"model": model},
+    ).fetchall()
+    names = [row[0] for row in rows]
+    for start in range(0, len(names), chunk_size):
+        batch = names[start : start + chunk_size]
+        vectors = client.embed(batch)
+        for name, vector in zip(batch, vectors, strict=True):
+            embedding = ProductEmbedding(
+                id=product_embedding_id(name, model),
+                product_name=name,
+                model=model,
+                embedding=vector,
+            )
+            conn.execute(_UPSERT_PRODUCT_EMBEDDING, embedding.model_dump())
     return len(names)

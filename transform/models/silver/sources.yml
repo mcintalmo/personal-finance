@@ -38,6 +38,20 @@ sources:
           a local Ollama chat call
           (personal_finance.llm_categorize.compute_missing_llm_categories,
           `pf classify`) and reused across runs.
+      - name: product_embeddings
+        description: >-
+          Cached embedding vector per distinct split product_name, computed
+          via a local Ollama call
+          (personal_finance.embed.compute_missing_product_embeddings,
+          `pf enrich`) and reused across runs. Kept separate from
+          merchant_embeddings — a product name and a merchant name are
+          different vocabularies.
+      - name: product_llm_categories
+        description: >-
+          Cached LLM category choice per distinct split product_name,
+          computed via a local Ollama chat call
+          (personal_finance.llm_categorize.compute_missing_product_llm_categories,
+          `pf classify`) and reused across runs.
       - name: labels
         description: >-
           Human categorization corrections (personal_finance.review.record_label,

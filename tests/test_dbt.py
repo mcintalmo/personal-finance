@@ -15,9 +15,9 @@ import duckdb
 import pytest
 
 from personal_finance.ddl import create_schema
-from personal_finance.embed import merchant_embedding_id
+from personal_finance.embed import merchant_embedding_id, product_embedding_id
 from personal_finance.ingest import run_ingestion
-from personal_finance.llm_categorize import merchant_llm_category_id
+from personal_finance.llm_categorize import merchant_llm_category_id, product_llm_category_id
 from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.synth import (
     generate_amazon_orders,
@@ -1633,3 +1633,339 @@ class TestSilverSplitCategories:
                 "where cat.id is null"
             ).fetchone()
         assert orphans == 0
+
+
+# Hand-crafted vectors (not real Ollama output), same shape as the
+# transaction cascade's _SYNTHETIC_EMBEDDINGS: "Organic Gala Apples" is a real
+# stage-1-categorized product in the amazon_warehouse fixture (essentials/
+# groceries/apples); "Kindle..."/"Ninja..." are real stage-1-uncategorized
+# products (nothing in rules.yaml matches them) — one a deliberate
+# near-duplicate of the apples vector (should match), one orthogonal (should
+# not, staying uncategorized for the LLM stage to pick up).
+_TEST_PRODUCT_EMBEDDING_MODEL = "test-embedding-model"
+_TEST_PRODUCT_CONFIDENCE_THRESHOLD = 0.80
+_SYNTHETIC_PRODUCT_EMBEDDINGS = {
+    "Organic Gala Apples, 3 lb Bag": [1.0, 0.0, 0.0],
+    "Kindle Paperwhite Fabric Case": [
+        0.99,
+        0.01,
+        0.0,
+    ],  # cos with apples ≈ 0.9999 — clears threshold
+    "Ninja Foodi Digital Air Fryer": [0.0, 1.0, 0.0],  # cos with apples = 0 — stays unmatched
+}
+
+
+@pytest.fixture(scope="module")
+def product_embedding_warehouse(amazon_warehouse):
+    """``amazon_warehouse`` plus synthetic ``product_embeddings``, with dbt
+    re-run (overriding the embedding vars) so silver_split_categories_embedding
+    picks them up.
+    """
+    warehouse, _scenario, _orders = amazon_warehouse
+    bronze = warehouse.parent / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    with duckdb.connect(str(warehouse)) as conn:
+        for name, vector in _SYNTHETIC_PRODUCT_EMBEDDINGS.items():
+            conn.execute(
+                "INSERT INTO product_embeddings (id, created_at, product_name, model, embedding) "
+                "VALUES ($id, now(), $product_name, $model, $embedding)",
+                {
+                    "id": product_embedding_id(name, _TEST_PRODUCT_EMBEDDING_MODEL),
+                    "product_name": name,
+                    "model": _TEST_PRODUCT_EMBEDDING_MODEL,
+                    "embedding": vector,
+                },
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_PRODUCT_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_PRODUCT_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+# "Ninja Foodi Digital Air Fryer" is the embedding stage's deliberately-
+# unmatched product — the LLM stage picks it up from there.
+_TEST_PRODUCT_LLM_MODEL = "test-chat-model"
+_TEST_PRODUCT_LLM_CONFIDENCE_THRESHOLD = 0.50
+_SYNTHETIC_PRODUCT_LLM_CATEGORIES = {
+    "Ninja Foodi Digital Air Fryer": ("essentials/housing", 0.9),
+}
+
+
+@pytest.fixture(scope="module")
+def product_llm_warehouse(product_embedding_warehouse):
+    """``product_embedding_warehouse`` plus a synthetic ``product_llm_categories``
+    row, with dbt re-run (overriding the LLM vars) so
+    silver_split_categories_llm picks it up.
+    """
+    warehouse = product_embedding_warehouse
+    bronze = warehouse.parent / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    with duckdb.connect(str(warehouse)) as conn:
+        for name, (path, confidence) in _SYNTHETIC_PRODUCT_LLM_CATEGORIES.items():
+            conn.execute(
+                "INSERT INTO product_llm_categories "
+                "(id, created_at, product_name, model, category_id, confidence) "
+                "VALUES ($id, now(), $product_name, $model, $category_id, $confidence)",
+                {
+                    "id": product_llm_category_id(name, _TEST_PRODUCT_LLM_MODEL),
+                    "product_name": name,
+                    "model": _TEST_PRODUCT_LLM_MODEL,
+                    "category_id": category_id_for_path(path),
+                    "confidence": confidence,
+                },
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_PRODUCT_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_PRODUCT_CONFIDENCE_THRESHOLD,
+                            "llm_model": _TEST_PRODUCT_LLM_MODEL,
+                            "llm_confidence_threshold": _TEST_PRODUCT_LLM_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+@pytest.fixture(scope="module")
+def split_human_warehouse(product_llm_warehouse):
+    """``product_llm_warehouse`` plus one human label overriding a rule
+    assignment and one filling a gap no automated stage covered, with dbt
+    re-run so silver_split_categories_human/_all pick them up.
+    """
+    warehouse = product_llm_warehouse
+    bronze = warehouse.parent / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    with duckdb.connect(str(warehouse)) as conn:
+        (overridden_id,) = conn.execute(
+            """
+            select sc.split_id
+            from main_silver.silver_split_categories sc
+            join main_silver.silver_amazon_splits s using (split_id)
+            where s.product_name = 'Organic Gala Apples, 3 lb Bag'
+            limit 1
+            """
+        ).fetchone()
+        (gap_id,) = conn.execute(
+            """
+            select split_id from main_silver.silver_amazon_splits
+            where split_id not in (
+                select split_id from main_silver.silver_split_categories_all
+            )
+            limit 1
+            """
+        ).fetchone()
+        for split_id, path in (
+            (overridden_id, "non-essentials/dining"),
+            (gap_id, "essentials/housing"),
+        ):
+            conn.execute(
+                "INSERT INTO labels (id, created_at, subject_kind, subject_id, category_id) "
+                "VALUES (uuid()::text, now(), 'split', $subject_id, $category_id)",
+                {"subject_id": split_id, "category_id": category_id_for_path(path)},
+            )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    json.dumps(
+                        {
+                            "embedding_model": _TEST_PRODUCT_EMBEDDING_MODEL,
+                            "embedding_confidence_threshold": _TEST_PRODUCT_CONFIDENCE_THRESHOLD,
+                            "llm_model": _TEST_PRODUCT_LLM_MODEL,
+                            "llm_confidence_threshold": _TEST_PRODUCT_LLM_CONFIDENCE_THRESHOLD,
+                            "known_cities": config.known_cities,
+                        }
+                    ),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse, overridden_id, gap_id
+
+
+class TestSilverSplitCategoriesEmbedding:
+    def test_near_duplicate_product_is_matched(self, product_embedding_warehouse):
+        with duckdb.connect(str(product_embedding_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select cat.name, sce.categorization_confidence
+                from main_silver.silver_split_categories_embedding sce
+                join main_silver.silver_amazon_splits s using (split_id)
+                join main_silver.silver_categories cat on cat.id = sce.category_id
+                where s.product_name = 'Kindle Paperwhite Fabric Case'
+                """
+            ).fetchone()
+        assert row is not None
+        name, confidence = row
+        assert name == "apples"
+        assert confidence >= _TEST_PRODUCT_CONFIDENCE_THRESHOLD
+
+    def test_orthogonal_product_stays_unmatched(self, product_embedding_warehouse):
+        with duckdb.connect(str(product_embedding_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select 1
+                from main_silver.silver_split_categories_embedding sce
+                join main_silver.silver_amazon_splits s using (split_id)
+                where s.product_name = 'Ninja Foodi Digital Air Fryer'
+                """
+            ).fetchone()
+        assert row is None
+
+    def test_rule_categorized_products_are_excluded_from_stage2(self, product_embedding_warehouse):
+        # Apples is already rule-matched; it must not also appear here even
+        # though it has an embedding (it's the reference vector itself).
+        with duckdb.connect(str(product_embedding_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select 1
+                from main_silver.silver_split_categories_embedding sce
+                join main_silver.silver_amazon_splits s using (split_id)
+                where s.product_name = 'Organic Gala Apples, 3 lb Bag'
+                """
+            ).fetchone()
+        assert row is None
+
+
+class TestSilverSplitCategoriesLlm:
+    def test_llm_categorizes_what_embedding_missed(self, product_llm_warehouse):
+        with duckdb.connect(str(product_llm_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select cat.name, scl.categorization_confidence
+                from main_silver.silver_split_categories_llm scl
+                join main_silver.silver_amazon_splits s using (split_id)
+                join main_silver.silver_categories cat on cat.id = scl.category_id
+                where s.product_name = 'Ninja Foodi Digital Air Fryer'
+                """
+            ).fetchone()
+        assert row is not None
+        name, confidence = row
+        assert name == "housing"
+        assert confidence == pytest.approx(0.9)
+
+    def test_does_not_double_categorize_already_matched_products(self, product_llm_warehouse):
+        with duckdb.connect(str(product_llm_warehouse)) as conn:
+            row = conn.execute(
+                """
+                select 1
+                from main_silver.silver_split_categories_llm scl
+                join main_silver.silver_amazon_splits s using (split_id)
+                where s.product_name = 'Kindle Paperwhite Fabric Case'
+                """
+            ).fetchone()
+        assert row is None
+
+
+class TestSilverSplitCategoriesHuman:
+    def test_human_label_appears_in_human_stage(self, split_human_warehouse):
+        warehouse, overridden_id, gap_id = split_human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = dict(
+                conn.execute(
+                    "select split_id, categorization_source "
+                    "from main_silver.silver_split_categories_human "
+                    "where split_id in ($overridden_id, $gap_id)",
+                    {"overridden_id": overridden_id, "gap_id": gap_id},
+                ).fetchall()
+            )
+        assert rows == {overridden_id: "human", gap_id: "human"}
+
+
+class TestSilverSplitCategoriesAll:
+    def test_human_overrides_rule_assignment(self, split_human_warehouse):
+        warehouse, overridden_id, _gap_id = split_human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                "select cat.name, sca.categorization_source "
+                "from main_silver.silver_split_categories_all sca "
+                "join main_silver.silver_categories cat on cat.id = sca.category_id "
+                "where sca.split_id = $id",
+                {"id": overridden_id},
+            ).fetchone()
+        assert row == ("dining", "human")
+
+    def test_every_stage_is_represented(self, split_human_warehouse):
+        warehouse, _overridden_id, _gap_id = split_human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            sources = {
+                row[0]
+                for row in conn.execute(
+                    "select distinct categorization_source "
+                    "from main_silver.silver_split_categories_all"
+                ).fetchall()
+            }
+        assert sources == {"rule", "embedding", "llm", "human"}
+
+    def test_no_duplicate_splits_across_stages(self, split_human_warehouse):
+        warehouse, _overridden_id, _gap_id = split_human_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (total,) = conn.execute(
+                "select count(*) from main_silver.silver_split_categories_all"
+            ).fetchone()
+            (distinct,) = conn.execute(
+                "select count(distinct split_id) from main_silver.silver_split_categories_all"
+            ).fetchone()
+        assert total == distinct > 0

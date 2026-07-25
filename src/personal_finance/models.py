@@ -267,3 +267,30 @@ class MerchantLlmCategory(Entity):
     model: str
     category_id: str
     confidence: float
+
+
+class ProductEmbedding(Entity):
+    """A cached embedding vector for a distinct split ``product_name``.
+
+    The split-categorization cascade's analog of :class:`MerchantEmbedding` —
+    kept in its own table (not merged into ``merchant_embeddings``) since a
+    product name and a merchant name are different vocabularies; comparing a
+    product's embedding against merchant embeddings (or vice versa) would be
+    a nonsensical nearest-neighbor match.
+    """
+
+    product_name: str
+    model: str
+    embedding: list[float]
+
+
+class ProductLlmCategory(Entity):
+    """A cached LLM category choice for a distinct split ``product_name``.
+
+    The split-categorization cascade's analog of :class:`MerchantLlmCategory`.
+    """
+
+    product_name: str
+    model: str
+    category_id: str
+    confidence: float

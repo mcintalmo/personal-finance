@@ -171,6 +171,29 @@ class TestDeposit:
         assert "File not found" in result.output
 
 
+def _build_transformed_warehouse_with_amazon(tmp_path):
+    """Like each class's `_build_transformed_warehouse`, but also ingests the
+    credit-card source Amazon charges post to, plus the Amazon order-history
+    export itself, so silver_amazon_splits has real rows to embed/classify/review.
+    """
+    init = runner.invoke(app, ["init-db", "--config-dir", "config/examples"])
+    assert init.exit_code == 0, init.output
+    synth = runner.invoke(app, ["synth", "--out", str(tmp_path / "synth"), "--months", "2"])
+    assert synth.exit_code == 0, synth.output
+    for file_path, source in (
+        (tmp_path / "synth" / "exports" / "chase_checking.csv", None),
+        (tmp_path / "synth" / "exports" / "amex.csv", None),
+        (tmp_path / "synth" / "amazon" / "Retail.OrderHistory.1.csv", "amazon"),
+    ):
+        args = ["ingest", str(file_path), "--config-dir", "config/examples"]
+        if source:
+            args += ["--source", source]
+        ingest = runner.invoke(app, args)
+        assert ingest.exit_code == 0, ingest.output
+    transform = runner.invoke(app, ["transform"])
+    assert transform.exit_code == 0, transform.output
+
+
 class TestEnrich:
     def test_requires_initialized_warehouse(self):
         result = runner.invoke(app, ["enrich"])
@@ -243,6 +266,28 @@ class TestEnrich:
         result = runner.invoke(app, ["enrich"])
         assert result.exit_code == 1
         assert "Embedding failed" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_embeds_products_when_amazon_data_present(self, monkeypatch, tmp_path):
+        _build_transformed_warehouse_with_amazon(tmp_path)
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def embed(self, texts):
+                return [[float(len(t)), 0.0] for t in texts]
+
+        monkeypatch.setattr("personal_finance.cli.EmbeddingClient", lambda *a, **k: FakeClient())
+        result = runner.invoke(app, ["enrich"])
+        assert result.exit_code == 0, result.output
+        assert "product(s)" in result.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            (count,) = conn.execute("select count(*) from product_embeddings").fetchone()
+        assert count > 0
 
 
 class TestClassify:
@@ -322,6 +367,30 @@ class TestClassify:
         assert result.exit_code == 1
         assert "Classification failed" in result.output
 
+    @pytest.mark.filterwarnings("ignore")
+    def test_classifies_products_when_amazon_data_present(self, monkeypatch, tmp_path):
+        _build_transformed_warehouse_with_amazon(tmp_path)
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return None
+
+            def classify(self, subject, category_paths, **kwargs):
+                return category_paths[0], 0.9
+
+        monkeypatch.setattr(
+            "personal_finance.cli.LlmCategorizeClient", lambda *a, **k: FakeClient()
+        )
+        result = runner.invoke(app, ["classify"])
+        assert result.exit_code == 0, result.output
+        assert "product(s)" in result.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            (count,) = conn.execute("select count(*) from product_llm_categories").fetchone()
+        assert count > 0
+
 
 class TestReview:
     def test_requires_initialized_warehouse(self):
@@ -397,6 +466,52 @@ class TestReview:
         result = runner.invoke(app, ["review", "label", transaction_id, "not/a/real/path"])
         assert result.exit_code == 1
         assert "Unknown category path" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_invalid_kind_exits_nonzero(self, tmp_path):
+        self._build_transformed_warehouse(tmp_path)
+        result = runner.invoke(app, ["review", "list", "--kind", "bogus"])
+        assert result.exit_code == 1
+        assert "--kind must be one of" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_lists_uncategorized_splits(self, tmp_path):
+        _build_transformed_warehouse_with_amazon(tmp_path)
+        result = runner.invoke(app, ["review", "list", "--kind", "split"])
+        assert result.exit_code == 0, result.output
+        assert "awaiting review" in result.output
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_labels_a_split_and_removes_it_from_the_queue(self, tmp_path):
+        _build_transformed_warehouse_with_amazon(tmp_path)
+        before = runner.invoke(app, ["review", "list", "--kind", "split", "--limit", "1000"])
+        assert before.exit_code == 0, before.output
+        split_id = before.output.splitlines()[0].split()[0]
+
+        label = runner.invoke(
+            app, ["review", "label", split_id, "essentials/groceries", "--kind", "split"]
+        )
+        assert label.exit_code == 0, label.output
+        assert "Labeled" in label.output
+
+        transform = runner.invoke(app, ["transform"])
+        assert transform.exit_code == 0, transform.output
+        with duckdb.connect(str(get_settings().data.warehouse_path)) as conn:
+            row = conn.execute(
+                "select categorization_source from main_silver.silver_split_categories_all "
+                "where split_id = $id",
+                {"id": split_id},
+            ).fetchone()
+        assert row == ("human",)
+
+    @pytest.mark.filterwarnings("ignore")
+    def test_unknown_split_exits_nonzero(self, tmp_path):
+        _build_transformed_warehouse_with_amazon(tmp_path)
+        result = runner.invoke(
+            app, ["review", "label", "does-not-exist", "essentials/groceries", "--kind", "split"]
+        )
+        assert result.exit_code == 1
+        assert "No such split" in result.output
 
 
 class TestReviewMerge:
