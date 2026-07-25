@@ -22,8 +22,7 @@ receipts only), so Phase 5 targets Amazon only for now; Costco (and other photo/
 receipts) stays in Phase 9 until vision-LLM parsing exists.
 
 - [x] Amazon order-history CSV ingestion: see Done below.
-- [ ] Amazon order ↔ card-charge matching (amount + date window, deterministic — same shape as
-      silver_transfers)
+- [x] Amazon order ↔ card-charge matching: see Done below.
 - [ ] Transaction decomposition into splits, keyed off matched order line items
 - [ ] Line-item categorization through the same cascade (enables "spend on apples this year")
 
@@ -76,6 +75,20 @@ one phase at a time when the previous phase's demo is complete.
       `silver_amazon_shipments` aggregates the right item counts/totals and `silver_transactions`
       has zero NULL `account_name` rows (the bronze-glob-collision bug this task found and fixed
       via the `dataset_name` parameterization) (2026-07-24).
+- [x] Amazon order ↔ card-charge matching (Phase 5): new `silver_amazon_order_matches` model —
+      deterministic amount + date matching between `silver_amazon_shipments` and
+      `silver_transactions`, same 1:1 ranking shape as `silver_transfers` (a shipment and its card
+      charge are two records of one real-world event, like a transfer's two legs, not a fuzzy-match
+      problem). A shipment's `total_owed` must negate a transaction's `amount`, currencies must
+      match, and dates must fall within `amazon_match_window_days` (default 5) of each other;
+      `row_number()` partitioned by shipment and by transaction keeps only mutually-closest pairs,
+      so a shipment can't double-claim a charge or vice versa. New `schema.yml` entry with
+      `not_null`/`unique`/`relationships` tests (uniqueness is on the (website_order_id, ship_date)
+      pair, not website_order_id alone — an order that ships in two boxes produces two shipments).
+      **Live-verified end-to-end** against the real scratch warehouse from the ingestion stage:
+      ingested `chase_checking` + `amex` (the credit card Amazon charges post to) + `amazon`, ran
+      `pf transform` (129/129 checks green), confirmed all 5 generated shipments matched 1:1 to
+      their real card charges with `day_gap = 0` (2026-07-24).
 - [x] Merchant resolution for the outlier tail (Phase 3 follow-up): embedding-similarity
       merge-candidate review queue, human-confirmed only — mis-merging two distinct real
       merchants silently corrupts spend history in a way a wrong category doesn't, so

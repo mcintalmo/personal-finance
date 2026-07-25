@@ -274,9 +274,8 @@ models:
       One row per Amazon shipment — matching card-charge granularity, not per
       order or per line item (docs/source-schemas.md's matching note): a
       multi-item order shipped in two boxes produces two separate card
-      charges. Order↔charge matching against silver_transactions and split
-      decomposition are later Phase 5 stages, not built on top of this model
-      yet.
+      charges. Order↔charge matching (silver_amazon_order_matches) and split
+      decomposition (a later Phase 5 stage) are built on top of this model.
     columns:
       - name: website_order_id
         data_tests: [not_null]
@@ -291,6 +290,38 @@ models:
         description: Sum of this shipment's item subtotals (pre-tax).
         data_tests: [not_null]
       - name: item_count
+        data_tests: [not_null]
+
+  - name: silver_amazon_order_matches
+    description: >-
+      One row per matched (Amazon shipment, card charge) pair — deterministic
+      amount + date matching, same shape as silver_transfers. Split
+      decomposition (attaching line items to the matched charge) is a later
+      Phase 5 stage, not built on top of this model yet.
+    columns:
+      - name: order_match_id
+        data_tests: [unique, not_null]
+      - name: website_order_id
+        description: >-
+          The matched shipment's order id — not unique alone (an order that
+          ships in two boxes has two shipments, hence two rows here); the
+          (website_order_id, ship_date) pair matches 1:1 to one transaction_id.
+        data_tests: [not_null]
+      - name: ship_date
+        data_tests: [not_null]
+      - name: transaction_id
+        description: The matched card charge; unique here since matching is 1:1.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: total_owed
+        data_tests: [not_null]
+      - name: day_gap
+        description: Absolute days between ship_date and the charge's posted_on.
         data_tests: [not_null]
 
   - name: silver_categories

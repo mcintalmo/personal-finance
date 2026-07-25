@@ -1379,6 +1379,10 @@ def amazon_warehouse(tmp_path_factory):
     exports = root / "exports"
     write_scenario(scenario, exports)
     run_ingestion(sources["chase_checking"], exports / "chase_checking.csv", bronze)
+    # Amazon charges post to the credit card (scenario.credit), not checking —
+    # ingest it too so silver_amazon_order_matches has real card-charge rows
+    # to match against, not just checking transactions.
+    run_ingestion(sources["amex"], exports / "amex.csv", bronze)
 
     orders = generate_amazon_orders(scenario, seed=42)
     amazon_dir = root / "amazon"
@@ -1454,3 +1458,54 @@ class TestSilverAmazonShipments:
             ).fetchall()
         for order_id, ship_date, item_count in rows:
             assert item_count == by_shipment[order_id, ship_date]
+
+
+class TestSilverAmazonOrderMatches:
+    def test_every_shipment_matches_its_generated_transaction(self, amazon_warehouse):
+        # None of the standard credit-card CSV formats carry external_id (only
+        # venmo does), so match ground truth via amount + date — the same
+        # pair the SQL join keys on — rather than transaction_external_id.
+        warehouse, scenario, orders = amazon_warehouse
+        expected = {
+            txn.external_id: -txn.amount
+            for txn in scenario.credit.transactions
+            if txn.external_id in {o.transaction_external_id for o in orders}
+        }
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select website_order_id, ship_date, total_owed "
+                "from main_silver.silver_amazon_order_matches"
+            ).fetchall()
+        assert rows
+        assert len(rows) == len({o.website_order_id for o in orders})
+        matched_amounts = {total_owed for _, _, total_owed in rows}
+        assert matched_amounts == set(expected.values())
+
+    def test_matching_is_one_to_one(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (transaction_dupes,) = conn.execute(
+                "select count(*) from ("
+                "  select transaction_id from main_silver.silver_amazon_order_matches"
+                "  group by transaction_id having count(*) > 1"
+                ")"
+            ).fetchone()
+            (shipment_dupes,) = conn.execute(
+                "select count(*) from ("
+                "  select website_order_id, ship_date from main_silver.silver_amazon_order_matches"
+                "  group by website_order_id, ship_date having count(*) > 1"
+                ")"
+            ).fetchone()
+        assert transaction_dupes == 0
+        assert shipment_dupes == 0
+
+    def test_day_gap_is_zero_for_generated_data(self, amazon_warehouse):
+        # The synth generator sets ship_date == the source transaction's
+        # posted_on, so every match should be a same-day match.
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select day_gap from main_silver.silver_amazon_order_matches"
+            ).fetchall()
+        assert rows
+        assert all(day_gap == 0 for (day_gap,) in rows)
