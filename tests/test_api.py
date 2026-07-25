@@ -60,6 +60,28 @@ def test_overview_returns_503_before_transform(client):
     )
 
 
+def test_merchants_top_returns_503_before_transform(client):
+    """Regression test: this endpoint used to read main_silver.silver_merchants
+    with no build-gate, raising a raw duckdb.CatalogException (bare 500)
+    instead of the same friendly 503 every other endpoint gives."""
+    import duckdb
+
+    duckdb.connect(str(get_settings().data.warehouse_path)).close()
+    response = client.get("/merchants/top")
+    assert response.status_code == 503
+    assert "pf transform" in response.json()["detail"]
+
+
+def test_review_queue_returns_503_before_transform(client):
+    """Same regression as test_merchants_top_returns_503_before_transform."""
+    import duckdb
+
+    duckdb.connect(str(get_settings().data.warehouse_path)).close()
+    response = client.get("/review/queue")
+    assert response.status_code == 503
+    assert "pf transform" in response.json()["detail"]
+
+
 def _build_transformed_warehouse(tmp_path) -> None:
     config_dir = str(tmp_path / "config")
     init = runner.invoke(cli_app, ["init-db", "--config-dir", config_dir])
@@ -165,6 +187,7 @@ class TestReviewQueue:
         from personal_finance.review import ReviewItem
 
         duckdb.connect(str(get_settings().data.warehouse_path)).close()
+        monkeypatch.setattr(api_module, "_require_silver_built", lambda conn: None)
         item = ReviewItem(
             transaction_id="txn-1",
             posted_on=date(2026, 1, 1),

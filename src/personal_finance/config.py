@@ -56,6 +56,17 @@ class OllamaSettings(BaseModel):
     chat_model: str = "phi3:mini"
 
 
+class ServingSettings(BaseModel):
+    """Phase 6 serving-layer settings (``settings.serving.*``).
+
+    ``api_url`` is where the Streamlit app (``pf dashboard``) finds the
+    FastAPI app (``pf serve``) — both processes read this same default so
+    they agree without either hardcoding the other's address.
+    """
+
+    api_url: str = "http://127.0.0.1:8000"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -76,6 +87,9 @@ class Settings(BaseSettings):
 
     # ── Local LLM (Ollama) ─────────────────────────────────
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+
+    # ── Serving (FastAPI + Streamlit) ──────────────────────
+    serving: ServingSettings = Field(default_factory=ServingSettings)
 
     # ── Paths ─────────────────────────────────────────────
     config_dir: Path = Path("config")  # user-editable YAML config (see user_config.py)

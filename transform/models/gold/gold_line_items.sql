@@ -32,6 +32,7 @@ split_line_items as (
     from {{ ref('silver_amazon_splits') }} as s
     inner join {{ ref('silver_transactions') }} as t using (transaction_id)
     left join {{ ref('silver_split_categories_all') }} as sc using (split_id)
+    where not t.is_transfer
 ),
 
 transaction_line_items as (

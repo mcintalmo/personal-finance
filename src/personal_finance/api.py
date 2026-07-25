@@ -64,15 +64,24 @@ def get_conn() -> Generator[duckdb.DuckDBPyConnection]:
 Conn = Annotated[duckdb.DuckDBPyConnection, Depends(get_conn)]
 
 
-def _require_gold_built(conn: duckdb.DuckDBPyConnection) -> None:
+def _require_table_built(conn: duckdb.DuckDBPyConnection, schema: str, table: str) -> None:
     result = conn.execute(
         "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_schema = 'main_gold' AND table_name = 'gold_category_rollups'"
+        "WHERE table_schema = $schema AND table_name = $table",
+        {"schema": schema, "table": table},
     ).fetchone()
     if not result or not result[0]:
         raise HTTPException(
-            status_code=503, detail="Gold marts have not been built yet — run `pf transform` first."
+            status_code=503, detail="dbt models have not been built yet — run `pf transform` first."
         )
+
+
+def _require_gold_built(conn: duckdb.DuckDBPyConnection) -> None:
+    _require_table_built(conn, "main_gold", "gold_category_rollups")
+
+
+def _require_silver_built(conn: duckdb.DuckDBPyConnection) -> None:
+    _require_table_built(conn, "main_silver", "silver_transactions")
 
 
 @app.get("/health")
@@ -128,6 +137,7 @@ class TopMerchant(BaseModel):
 
 @app.get("/merchants/top")
 def top_merchants(conn: Conn, limit: int = 10) -> list[TopMerchant]:
+    _require_silver_built(conn)
     rows = conn.execute(
         "SELECT merchant_name, transaction_count, total_outflow "
         "FROM main_silver.silver_merchants ORDER BY total_outflow DESC LIMIT $limit",
@@ -253,6 +263,7 @@ class SplitReviewItem(BaseModel):
 def review_queue(
     conn: Conn, kind: Literal["transaction", "split"] = "transaction", limit: int = 20
 ) -> list[TransactionReviewItem] | list[SplitReviewItem]:
+    _require_silver_built(conn)
     if kind == "split":
         items = fetch_split_review_queue(conn, limit=limit)
         return [

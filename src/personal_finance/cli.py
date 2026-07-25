@@ -166,13 +166,15 @@ def serve(
 
 @app.command()
 def dashboard(
-    api_url: str = typer.Option("http://127.0.0.1:8000", help="Base URL of a running `pf serve`."),
+    api_url: str = typer.Option(
+        None, help="Base URL of a running `pf serve` (default: Settings.serving.api_url)."
+    ),
     port: int = typer.Option(8501, help="Bind port for the Streamlit app."),
 ) -> None:
     """Run the Streamlit dashboard (personal_finance.webapp) against a running `pf serve`."""
     webapp_main = Path(__file__).parent / "webapp" / "Overview.py"
     env = os.environ.copy()
-    env["PF_API_URL"] = api_url
+    env["PF_API_URL"] = api_url or get_settings().serving.api_url
     subprocess.run(
         [
             sys.executable,

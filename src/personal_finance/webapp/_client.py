@@ -11,7 +11,16 @@ from typing import Any
 import httpx
 import streamlit as st
 
-API_URL = os.environ.get("PF_API_URL", "http://127.0.0.1:8000")
+from personal_finance.config import get_settings
+
+API_URL = os.environ.get("PF_API_URL") or get_settings().serving.api_url
+
+
+def _error_detail(response: httpx.Response) -> str:
+    try:
+        return response.json().get("detail", response.text)
+    except ValueError:
+        return response.text
 
 
 def _request(method: str, path: str, **kwargs: Any) -> Any:
@@ -22,7 +31,7 @@ def _request(method: str, path: str, **kwargs: Any) -> Any:
         st.error(f"Can't reach the API at {API_URL} — run `pf serve` in another terminal.")
         st.stop()
     except httpx.HTTPStatusError as exc:
-        st.error(f"{path}: {exc.response.json().get('detail', exc.response.text)}")
+        st.error(f"{path}: {_error_detail(exc.response)}")
         st.stop()
     return response.json()
 
