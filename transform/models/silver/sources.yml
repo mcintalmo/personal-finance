@@ -62,6 +62,17 @@ sources:
           Budget buckets over a category subtree, seeded from config
           budgets.yaml (personal_finance.seed.seed_budgets, `pf init-db`).
           Powers gold_budget_actuals' budget-vs-actual view (Phase 6).
+      - name: forecasts
+        description: >-
+          Spend/income forecasts computed by personal_finance.forecast
+          (`pf forecast`) — one row per (series, forecast month), each split
+          into a deterministic committed component (recurring charges
+          projected forward on each group's own cadence) and a
+          statistically modelled variable component. Only outflows have a
+          committed part — recurring detection does not cover income.
+          Fully recomputed each run, not incrementally cached: new
+          transactions change the history every model was fit to, so a stale
+          row is simply wrong. Published as gold_forecasts (Phase 7).
 
   # Bronze = raw source exports landed as Parquet by dlt (Phase 2). Read as a
   # single config-free glob over every source directory: a new bank/source

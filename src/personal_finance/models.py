@@ -16,7 +16,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _new_id() -> str:
@@ -80,6 +80,26 @@ class BudgetPeriod(StrEnum):
     MONTHLY = "monthly"
     QUARTERLY = "quarterly"
     YEARLY = "yearly"
+
+
+class ForecastSeriesKind(StrEnum):
+    """Which kind of series a forecast row belongs to."""
+
+    TOTAL_INFLOW = "total_inflow"
+    TOTAL_OUTFLOW = "total_outflow"
+    BUDGET_CATEGORY = "budget_category"
+
+
+class TrendDirection(StrEnum):
+    """Direction of the fitted trend over the observed history.
+
+    Answers "is this climbing month over month, or was last month just
+    expensive?" — a level shift shows up as FLAT, a sustained climb as RISING.
+    """
+
+    RISING = "rising"
+    FALLING = "falling"
+    FLAT = "flat"
 
 
 class MergeStatus(StrEnum):
@@ -294,3 +314,71 @@ class ProductLlmCategory(Entity):
     model: str
     category_id: str
     confidence: float
+
+
+class Forecast(Entity):
+    """One forecast month for one series, decomposed into its two components.
+
+    ``predicted_amount`` is always ``committed_amount + variable_amount``:
+
+    * **committed** — recurring charges due that month (rent, subscriptions),
+      projected forward deterministically from ``gold_recurring_expenses`` on
+      each group's own observed cadence. Known, not estimated.
+    * **variable** — everything else, from a statistical model fit to the
+      history with the committed component removed.
+
+    The interval covers the **variable component only**, so a category that is
+    mostly subscriptions gets a tight band and a mostly-discretionary one gets
+    an honest wide band. See :mod:`personal_finance.forecast`.
+    """
+
+    series_kind: ForecastSeriesKind
+    series_key: str  # 'total_inflow' | 'total_outflow' | a budget id
+    series_label: str
+    category_id: str | None = None  # set for BUDGET_CATEGORY series
+    period_start: date  # first day of the forecast month
+    horizon: int = Field(ge=1)  # months ahead of trained_through
+    committed_amount: Decimal
+    variable_amount: Decimal
+    predicted_amount: Decimal
+    lower_bound: Decimal
+    upper_bound: Decimal
+    interval_level: int = Field(ge=1, le=99)
+    model_name: str
+    # Backtest error vs. naive; < 1 beats naive. None means there was no
+    # meaningful scale to divide by (a perfectly flat series has zero naive
+    # error), or that every candidate failed to fit and `model_name` fell back
+    # to "mean" — the two cases are distinguishable by `model_name`.
+    mase: float | None = None
+    trend: TrendDirection
+    trained_through: date  # last COMPLETE month used to fit
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Forecast:
+        """Enforce what the docstring, the mart and the dbt test all assume.
+
+        These held only by construction before, so a rounding slip in
+        `personal_finance.forecast` surfaced as a failed dbt build after the
+        rows were already written. Checking here fails at the row that is
+        wrong, which is where the bug actually is.
+        """
+        if self.predicted_amount != self.committed_amount + self.variable_amount:
+            message = (
+                f"predicted_amount {self.predicted_amount} != committed "
+                f"{self.committed_amount} + variable {self.variable_amount}"
+            )
+            raise ValueError(message)
+        if not (self.lower_bound <= self.predicted_amount <= self.upper_bound):
+            message = (
+                f"interval [{self.lower_bound}, {self.upper_bound}] does not "
+                f"bracket predicted_amount {self.predicted_amount}"
+            )
+            raise ValueError(message)
+        is_total = self.series_kind is not ForecastSeriesKind.BUDGET_CATEGORY
+        if is_total and self.series_key != self.series_kind.value:
+            message = f"{self.series_kind} must use its own name as series_key"
+            raise ValueError(message)
+        if not is_total and self.category_id is None:
+            message = "a budget_category forecast must carry a category_id"
+            raise ValueError(message)
+        return self

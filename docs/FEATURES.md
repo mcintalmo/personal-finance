@@ -49,7 +49,7 @@
 ## 7. Intelligence
 - [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
 - [ ] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence)
-- [ ] Forecasting of spend/income (statsforecast)
+- [ ] Forecasting of spend/income (statsmodels: Theta/ETS over a committed+variable decomposition)
 - [ ] Trend and anomaly callouts on the dashboard
 
 ## 8. Automation & polish

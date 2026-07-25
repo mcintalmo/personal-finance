@@ -8,6 +8,7 @@ CI fails.
 
 import json
 import warnings
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 
 from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id, product_embedding_id
+from personal_finance.forecast import compute_forecasts
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id, product_llm_category_id
 from personal_finance.seed import seed_budgets, seed_categories, seed_merchant_aliases, seed_rules
@@ -2253,3 +2255,148 @@ class TestGoldRecurringExpenses:
         for amount, avg_gap_days, gap_days_stddev in rows:
             assert amount > 0
             assert gap_days_stddev <= avg_gap_days * 0.25
+
+
+@pytest.fixture(scope="module")
+def forecast_warehouse(tmp_path_factory):
+    """A warehouse with 18 months of history entirely in the past, budgets
+    seeded, and `pf forecast` run — so gold_forecasts is populated.
+
+    The scenario deliberately starts 2025-01 and runs 18 months (ending
+    2026-06) rather than using the synth default: forecasting only consumes
+    *complete* months strictly before ``today``, so a fixture whose activity
+    ran into the future would leave almost nothing to fit.
+    """
+    root = tmp_path_factory.mktemp("wh")
+    warehouse = root / "warehouse.duckdb"
+    bronze = root / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    with duckdb.connect(str(warehouse)) as conn:
+        create_schema(conn)
+        seed_categories(conn, config.taxonomy)
+        seed_rules(conn, config.rules)
+        seed_merchant_aliases(conn, config.merchant_aliases)
+        seed_budgets(conn, config.budgets)
+
+    exports = root / "exports"
+    write_scenario(generate_scenario(seed=42, start=date(2025, 1, 1), months=18), exports)
+    sources = {s.name: s for s in config.sources}
+    # Only the three canonical accounts: the other synth export files are
+    # alternate FORMATS of these same accounts, so ingesting them too would
+    # post every charge several times over under different account names.
+    for name, filename in _BRONZE_SOURCES:
+        run_ingestion(sources[name], exports / filename, bronze)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            args = [
+                "build",
+                "--project-dir",
+                str(REPO_ROOT / "transform"),
+                "--profiles-dir",
+                str(REPO_ROOT / "transform"),
+                "--vars",
+                json.dumps({"known_cities": config.known_cities}),
+            ]
+            assert dbtRunner().invoke(args).success  # silver/gold, incl. recurring expenses
+            with duckdb.connect(str(warehouse)) as conn:
+                # Fixed `today` keeps trained_through pinned to 2026-06 instead
+                # of drifting with the wall clock.
+                written = compute_forecasts(conn, horizon=3, today=date(2026, 7, 15))
+            result = dbtRunner().invoke(args)  # republish gold_forecasts
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse, written
+
+
+class TestGoldForecasts:
+    def test_forecast_rows_were_written(self, forecast_warehouse):
+        _, written = forecast_warehouse
+        assert written > 0
+
+    def test_covers_totals_and_every_budget(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            kinds = dict(
+                conn.execute(
+                    "select series_kind, count(distinct series_key) "
+                    "from main_gold.gold_forecasts group by series_kind"
+                ).fetchall()
+            )
+        assert kinds["total_inflow"] == 1
+        assert kinds["total_outflow"] == 1
+        assert kinds["budget_category"] == 3  # config/examples/budgets.yaml
+
+    def test_components_sum_to_the_prediction(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (bad,) = conn.execute(
+                "select count(*) from main_gold.gold_forecasts "
+                "where predicted_amount != committed_amount + variable_amount"
+            ).fetchone()
+        assert bad == 0
+
+    def test_recurring_charges_land_in_the_committed_component(self, forecast_warehouse):
+        """Rent + both subscriptions are detected as recurring, so total spend
+        must carry them as committed rather than leaving them to the model."""
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (committed,) = conn.execute(
+                "select distinct committed_amount from main_gold.gold_forecasts "
+                "where series_key = 'total_outflow'"
+            ).fetchone()
+        # CITYLINE RENT 1800.00 + NETFLIX 15.49 + SPOTIFY 11.99
+        assert committed == Decimal("1827.48")
+
+    def test_fully_recurring_category_gets_a_zero_width_interval(self, forecast_warehouse):
+        """The property the decomposition exists for: the Streaming budget is
+        100% subscriptions, so there is nothing uncertain left to widen it."""
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select committed_amount, variable_amount, lower_bound, upper_bound "
+                "from main_gold.gold_forecasts where series_label = 'Streaming'"
+            ).fetchall()
+        assert rows
+        for committed, variable, lower, upper in rows:
+            assert committed == Decimal("27.48")  # NETFLIX + SPOTIFY
+            assert variable == Decimal("0.00")
+            assert lower == upper  # deterministic: no uncertainty to express
+
+    def test_horizons_are_consecutive_future_months(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select horizon, period_start, trained_through from main_gold.gold_forecasts "
+                "where series_key = 'total_outflow' order by horizon"
+            ).fetchall()
+        assert [r[0] for r in rows] == [1, 2, 3]
+        assert [r[1] for r in rows] == [date(2026, 7, 1), date(2026, 8, 1), date(2026, 9, 1)]
+        # the partial month (2026-07) is excluded from training
+        assert all(r[2] == date(2026, 6, 1) for r in rows)
+
+    def test_category_path_is_joined_for_budget_series(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select category_path from main_gold.gold_forecasts "
+                "where series_kind = 'budget_category'"
+            ).fetchall()
+        assert rows
+        assert all(path for (path,) in rows)
+
+    def test_recompute_replaces_rather_than_appends(self, forecast_warehouse):
+        """Forecasts are a full recompute: re-running must not duplicate rows."""
+        warehouse, written = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            again = compute_forecasts(conn, horizon=3, today=date(2026, 7, 15))
+            (total,) = conn.execute("select count(*) from forecasts").fetchone()
+        assert again == written
+        assert total == written

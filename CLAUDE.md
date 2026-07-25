@@ -41,6 +41,20 @@ uv run pytest                                        # tests + coverage
 
 ## Claude-Specific Behaviour
 
+### Required workflow for every feature
+
+These two steps are **not optional** — they bracket all feature work:
+
+1. **Start with `/new-feature`.** Any new feature, phase, or phase stage begins by invoking the
+   `new-feature` skill (understand → plan → implement → test → `/run-checks` → summarise). Do not
+   start writing implementation code without it.
+2. **Review before merging to `main`.** Run a PR review (the `pr-review-toolkit:review-pr` skill,
+   or `/code-review` for the working diff) *before* merging any PR. Fix what the review confirms,
+   report findings via `ReportFindings` with an `outcome` once fixes land, and only then merge.
+
+Work is merged via PR, never committed directly to `main` (a pre-commit
+`no-commit-to-branch` hook enforces this) — branch, push, wait for CI green, then squash-merge.
+
 ### When asked to add a feature
 1. Understand where it fits in the project structure (see AGENTS.md → Project Structure).
 2. Write or update the implementation in `src/personal_finance/`.
