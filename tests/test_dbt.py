@@ -1559,3 +1559,52 @@ class TestSilverAmazonSplits:
             items, key=lambda o: o.shipment_item_subtotal + o.shipment_item_subtotal_tax
         )
         assert abs(by_asin[largest_item.asin]) >= abs(by_asin[smallest_item.asin])
+
+
+class TestSilverSplitCategories:
+    def test_apple_line_items_are_categorized(self, amazon_warehouse):
+        # The demo goal this whole phase is building toward (docs/PLAN.md):
+        # "how much have I spent this year on apples" answerable at the
+        # line-item level, not just per-charge.
+        warehouse, _scenario, orders = amazon_warehouse
+        apple_items = [o for o in orders if "apple" in o.product_name.lower()]
+        assert apple_items, "fixture must include an apple line item for this test to mean anything"
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select cat.name, sc.categorization_source, sc.categorization_confidence "
+                "from main_silver.silver_split_categories sc "
+                "join main_silver.silver_amazon_splits s using (split_id) "
+                "join main_silver.silver_categories cat on cat.id = sc.category_id "
+                "where s.product_name = 'Organic Gala Apples, 3 lb Bag'"
+            ).fetchall()
+        assert len(rows) == len(apple_items)
+        for name, source, confidence in rows:
+            assert name == "apples"
+            assert source == "rule"
+            assert confidence == pytest.approx(1.0)
+
+    def test_non_matching_product_names_are_uncategorized(self, amazon_warehouse):
+        # Nothing in rules.yaml matches "Echo Dot"/"Bounty"/etc. — confirming
+        # the "absent = uncategorized" contract, same as the transaction cascade.
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select s.split_id from main_silver.silver_amazon_splits s "
+                "where s.product_name not like '%Apple%' "
+                "and s.split_id not in (select split_id from main_silver.silver_split_categories)"
+            ).fetchall()
+            (total_non_apple,) = conn.execute(
+                "select count(*) from main_silver.silver_amazon_splits "
+                "where product_name not like '%Apple%'"
+            ).fetchone()
+        assert len(rows) == total_non_apple > 0
+
+    def test_split_category_ids_resolve_to_real_categories(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (orphans,) = conn.execute(
+                "select count(*) from main_silver.silver_split_categories sc "
+                "left join main_silver.silver_categories cat on cat.id = sc.category_id "
+                "where cat.id is null"
+            ).fetchone()
+        assert orphans == 0

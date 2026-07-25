@@ -350,6 +350,42 @@ models:
         description: This split's share of the transaction amount (same sign convention).
         data_tests: [not_null]
 
+  - name: silver_split_categories
+    description: >-
+      Line-item categorization — the rules-based cascade stage 1 also used for
+      transactions (silver_transaction_categories), applied to
+      silver_amazon_splits.product_name instead of merchant_name. A split
+      absent here is uncategorized by this stage; embedding/LLM/human-review
+      stages mirroring the transaction cascade are follow-up work, not built
+      yet.
+    columns:
+      - name: split_id
+        description: One row per matched split; absent = not matched by any product_name rule.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_amazon_splits')
+                field: split_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: rule_id
+        data_tests: [not_null]
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
   - name: silver_categories
     description: Cleaned category taxonomy (one row per category node).
     columns:

@@ -16,6 +16,10 @@
 > Phase 4 (Categorization) complete — demo verified 2026-07-22: every dummy transaction
 > categorized with confidence + provenance across all four cascade stages (rules → embedding
 > similarity → local-LLM fallback → human review), rolled up through the taxonomy at every level.
+> Phase 5 (Line items) complete — demo verified 2026-07-25: a fake Amazon order-history export →
+> line items attached to the matching card charge, decomposed into splits → rules-categorized →
+> "spend on apples this year" queryable end-to-end (Costco/photo receipts deferred to Phase 9;
+> embedding/LLM/human-review parity for split categorization is a tracked follow-up, see Backlog).
 
 Costco has no order-history export (confirmed against docs/source-schemas.md — in-app digital
 receipts only), so Phase 5 targets Amazon only for now; Costco (and other photo/PDF-only
@@ -24,7 +28,9 @@ receipts) stays in Phase 9 until vision-LLM parsing exists.
 - [x] Amazon order-history CSV ingestion: see Done below.
 - [x] Amazon order ↔ card-charge matching: see Done below.
 - [x] Transaction decomposition into splits, keyed off matched order line items: see Done below.
-- [ ] Line-item categorization through the same cascade (enables "spend on apples this year")
+- [x] Line-item categorization, rules stage (enables "spend on apples this year"): see Done below.
+      Embedding-similarity / local-LLM / human-review stages for splits, mirroring the transaction
+      cascade's stages 2-4, are a follow-up refinement — not required for this phase's demo bar.
 
 ## Backlog (later phases)
 
@@ -35,6 +41,15 @@ one phase at a time when the previous phase's demo is complete.
 
 - [x] Merchant normalization evaluation + config-driven aliases: see Done below.
 - [x] Merchant resolution for the outlier tail: see Done below.
+
+**Phase 5 split-categorization follow-ups** (deferred — not required for Phase 5's demo bar):
+
+- [ ] Embedding-similarity stage for splits (mirroring `silver_transaction_categories_embedding`)
+- [ ] Local-LLM fallback stage for splits (mirroring `silver_transaction_categories_llm`)
+- [ ] Human-review stage for splits (`EntityKind.SPLIT` exists on the `Label`/`Link` app models, but
+      `personal_finance.review.record_label` currently hardcodes `subject_kind=EntityKind.TRANSACTION`
+      — needs generalizing, plus a CLI path and a `silver_split_categories_all` union, mirroring
+      `silver_transaction_categories_all`)
 
 ## Done
 
@@ -103,6 +118,26 @@ one phase at a time when the previous phase's demo is complete.
       `not_null`/`unique`/`relationships` tests. **Live-verified end-to-end**: `pf transform`
       (138/138 checks green), confirmed every shipment's splits sum to exactly its transaction's
       amount to the cent (e.g. a 3-item shipment's `-18.27 + -37.03 + -20.04 = -75.34`) (2026-07-25).
+- [x] Line-item categorization, rules stage (Phase 5): new `silver_split_categories` model —
+      the same rules-based cascade stage 1 already used for transactions
+      (`silver_transaction_categories`), applied to `silver_amazon_splits.product_name` instead of
+      `merchant_name`. New `RuleApplyField.PRODUCT_NAME` ("product_name") — the two `applies_to`
+      universes (transaction fields vs. this one split field) are mutually exclusive by name, so
+      one `rules` table/config serves both without ambiguity; no per-field `UNION ALL` branching
+      needed here (unlike the transaction model) since product_name is the only split-level field
+      today. Added an `"Organic Gala Apples, 3 lb Bag"` catalog entry to
+      `personal_finance.synth.amazon_orders.CATALOG` and a matching `applies_to: product_name` rule
+      to `config/examples/rules.yaml`, to prove out this phase's stated demo goal
+      (docs/PLAN.md: "'apples' queryable") concretely rather than just structurally. Embedding-
+      similarity / local-LLM / human-review stages for splits, mirroring the transaction cascade's
+      stages 2-4, are explicit follow-up work, not required for this phase's demo bar. New
+      `schema.yml` entry with `not_null`/`unique`/`relationships` tests. **Live-verified
+      end-to-end**: regenerated a fresh 6-month Amazon fixture (confirming the new catalog entry
+      surfaces, since seed=42/months=2's fixture only includes 2 apple line items), ingested all
+      three sources, ran `pf transform` (148/148 checks green), and queried
+      `sum(-amount) from silver_split_categories join silver_amazon_splits ... where category =
+      'apples'` → `$32.03` across 3 matched line items — the phase's exact target query works
+      (2026-07-25).
 - [x] Merchant resolution for the outlier tail (Phase 3 follow-up): embedding-similarity
       merge-candidate review queue, human-confirmed only — mis-merging two distinct real
       merchants silently corrupts spend history in a way a wrong category doesn't, so
