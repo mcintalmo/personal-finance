@@ -18,7 +18,7 @@ from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id, product_embedding_id
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id, product_llm_category_id
-from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
+from personal_finance.seed import seed_budgets, seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.synth import (
     generate_amazon_orders,
     generate_scenario,
@@ -1969,3 +1969,192 @@ class TestSilverSplitCategoriesAll:
                 "select count(distinct split_id) from main_silver.silver_split_categories_all"
             ).fetchone()
         assert total == distinct > 0
+
+
+class TestGoldLineItems:
+    """gold_line_items (Phase 6) is the "implicit split" union: a transaction
+    with matched Amazon splits contributes its splits, not itself; every
+    other transaction contributes itself as one line item."""
+
+    def test_split_transactions_contribute_splits_not_themselves(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (matched_transactions,) = conn.execute(
+                "select count(distinct transaction_id) from main_silver.silver_amazon_splits"
+            ).fetchone()
+            (split_count,) = conn.execute(
+                "select count(*) from main_silver.silver_amazon_splits"
+            ).fetchone()
+            (line_items_for_matched,) = conn.execute(
+                "select count(*) from main_gold.gold_line_items "
+                "where transaction_id in (select transaction_id from main_silver.silver_amazon_splits)"
+            ).fetchone()
+            (transactions_present_directly,) = conn.execute(
+                "select count(*) from main_gold.gold_line_items "
+                "where line_item_id in (select transaction_id from main_silver.silver_amazon_splits)"
+            ).fetchone()
+        assert matched_transactions > 0
+        # Every matched transaction's line items are its splits (split_count
+        # of them across matched_transactions), never the transaction itself.
+        assert line_items_for_matched == split_count
+        assert transactions_present_directly == 0
+
+    def test_non_amazon_transactions_are_whole_line_items(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            row = conn.execute(
+                "select li.line_item_id, li.amount, t.amount "
+                "from main_gold.gold_line_items li "
+                "join main_silver.silver_transactions t using (transaction_id) "
+                "where li.transaction_id not in (select transaction_id from main_silver.silver_amazon_splits) "
+                "limit 1"
+            ).fetchone()
+        assert row is not None
+        _line_item_id, line_item_amount, transaction_amount = row
+        assert line_item_amount == transaction_amount
+
+    def test_transfers_are_excluded(self, built_warehouse):
+        warehouse, _bronze, _config, _result = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (leaked,) = conn.execute(
+                "select count(*) from main_gold.gold_line_items li "
+                "join main_silver.silver_transactions t using (transaction_id) "
+                "where t.is_transfer"
+            ).fetchone()
+        assert leaked == 0
+
+
+class TestGoldMonthlyFlow:
+    def test_net_amount_is_inflow_minus_outflow(self, built_warehouse):
+        warehouse, _bronze, _config, _result = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select total_inflow, total_outflow, net_amount from main_gold.gold_monthly_flow"
+            ).fetchall()
+        assert rows
+        for inflow, outflow, net in rows:
+            assert net == inflow - outflow
+
+    def test_total_transaction_count_matches_non_transfer_transactions(self, built_warehouse):
+        warehouse, _bronze, _config, _result = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (expected,) = conn.execute(
+                "select count(*) from main_silver.silver_transactions where not is_transfer"
+            ).fetchone()
+            (total,) = conn.execute(
+                "select sum(transaction_count) from main_gold.gold_monthly_flow"
+            ).fetchone()
+        assert total == expected
+
+
+class TestGoldSankeyFlow:
+    def test_income_edges_cover_every_account_with_inflow(self, built_warehouse):
+        warehouse, _bronze, _config, _result = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            income_accounts = {
+                row[0]
+                for row in conn.execute(
+                    "select target_node from main_gold.gold_sankey_flow where stage = 'income'"
+                ).fetchall()
+            }
+            expected_accounts = {
+                row[0]
+                for row in conn.execute(
+                    "select distinct account_name from main_silver.silver_transactions "
+                    "where flow = 'inflow' and not is_transfer"
+                ).fetchall()
+            }
+        assert income_accounts == expected_accounts
+
+    def test_spend_edges_target_only_root_categories(self, built_warehouse):
+        warehouse, _bronze, _config, _result = built_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            targets = {
+                row[0]
+                for row in conn.execute(
+                    "select distinct target_node from main_gold.gold_sankey_flow where stage = 'spend'"
+                ).fetchall()
+            }
+            roots = {
+                row[0]
+                for row in conn.execute(
+                    "select name from main_gold.gold_category_paths where depth = 0"
+                ).fetchall()
+            }
+        assert targets <= roots
+
+
+@pytest.fixture(scope="module")
+def budget_warehouse(built_warehouse):
+    """``built_warehouse`` plus the example config's three budgets, with dbt
+    re-run so gold_budget_actuals picks them up."""
+    warehouse, bronze, config, _ = built_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        seed_budgets(conn, config.budgets)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--vars",
+                    json.dumps({"known_cities": config.known_cities}),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse
+
+
+class TestGoldBudgetActuals:
+    def test_every_row_has_a_positive_budgeted_amount(self, budget_warehouse):
+        with duckdb.connect(str(budget_warehouse)) as conn:
+            rows = conn.execute(
+                "select budgeted_amount from main_gold.gold_budget_actuals"
+            ).fetchall()
+        assert rows
+        assert all(amount > 0 for (amount,) in rows)
+
+    def test_variance_is_actual_minus_budgeted(self, budget_warehouse):
+        with duckdb.connect(str(budget_warehouse)) as conn:
+            rows = conn.execute(
+                "select actual_outflow, budgeted_amount, variance "
+                "from main_gold.gold_budget_actuals"
+            ).fetchall()
+        for actual, budgeted, variance in rows:
+            assert variance == actual - budgeted
+
+    def test_actual_outflow_matches_manual_subtree_rollup(self, budget_warehouse):
+        with duckdb.connect(str(budget_warehouse)) as conn:
+            budget_id, category_id, period_start = conn.execute(
+                "select budget_id, category_id, period_start from main_gold.gold_budget_actuals "
+                "order by budget_id, period_start limit 1"
+            ).fetchone()
+            (reported,) = conn.execute(
+                "select actual_outflow from main_gold.gold_budget_actuals "
+                "where budget_id = $budget_id and period_start = $period_start",
+                {"budget_id": budget_id, "period_start": period_start},
+            ).fetchone()
+            (expected,) = conn.execute(
+                """
+                select sum(-li.amount)
+                from main_gold.gold_line_items li
+                join main_gold.gold_category_ancestors anc on anc.category_id = li.category_id
+                where anc.ancestor_id = $category_id
+                and li.amount < 0
+                and date_trunc('month', li.posted_on) = $period_start
+                """,
+                {"category_id": category_id, "period_start": period_start},
+            ).fetchone()
+        assert reported == expected

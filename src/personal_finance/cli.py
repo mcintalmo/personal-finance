@@ -19,6 +19,8 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -58,7 +60,12 @@ from personal_finance.merchant_merge import (
 )
 from personal_finance.models import EntityKind, MergeStatus
 from personal_finance.review import fetch_review_queue, fetch_split_review_queue, record_label
-from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
+from personal_finance.seed import (
+    seed_budgets,
+    seed_categories,
+    seed_merchant_aliases,
+    seed_rules,
+)
 
 if TYPE_CHECKING:
     from watchdog.observers.api import BaseObserver
@@ -128,7 +135,7 @@ def init_db(
         None, help="User config directory (default: Settings.config_dir)."
     ),
 ) -> None:
-    """Create the warehouse schema and seed the category taxonomy, rules, and merchant aliases."""
+    """Create the warehouse schema and seed the category taxonomy, rules, merchant aliases, and budgets."""
     warehouse = get_settings().data.warehouse_path
     config = _load_config_or_exit(config_dir)
     warehouse.parent.mkdir(parents=True, exist_ok=True)
@@ -137,9 +144,49 @@ def init_db(
         categories = seed_categories(conn, config.taxonomy)
         rules = seed_rules(conn, config.rules)
         aliases = seed_merchant_aliases(conn, config.merchant_aliases)
+        budgets = seed_budgets(conn, config.budgets)
     typer.echo(
         f"Initialized {warehouse}: {len(categories)} categories, {len(rules)} rules, "
+        f"{len(budgets)} budgets, "
         f"{len(aliases)} merchant aliases seeded"
+    )
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Bind address for the API server."),
+    port: int = typer.Option(8000, help="Bind port for the API server."),
+    reload: bool = typer.Option(False, help="Auto-reload on source changes (development only)."),
+) -> None:
+    """Run the FastAPI server (personal_finance.api) over the gold marts."""
+    import uvicorn
+
+    uvicorn.run("personal_finance.api:app", host=host, port=port, reload=reload)
+
+
+@app.command()
+def dashboard(
+    api_url: str = typer.Option(
+        None, help="Base URL of a running `pf serve` (default: Settings.serving.api_url)."
+    ),
+    port: int = typer.Option(8501, help="Bind port for the Streamlit app."),
+) -> None:
+    """Run the Streamlit dashboard (personal_finance.webapp) against a running `pf serve`."""
+    webapp_main = Path(__file__).parent / "webapp" / "Overview.py"
+    env = os.environ.copy()
+    env["PF_API_URL"] = api_url or get_settings().serving.api_url
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "streamlit",
+            "run",
+            str(webapp_main),
+            "--server.port",
+            str(port),
+        ],
+        env=env,
+        check=True,
     )
 
 

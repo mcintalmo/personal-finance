@@ -23,6 +23,7 @@ finances. Committed dummy templates live in ``config/examples/``; copy them in
 with ``cp config/examples/*.yaml config/`` (see ``config/README.md``).
 """
 
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -270,6 +271,9 @@ class BudgetConfig(_ConfigModel):
     category: str  # slash-separated taxonomy path
     period: BudgetPeriod
     amount: Decimal = Field(gt=0)
+    # Unset means "always active" — no start date to scope activity by, so
+    # gold_budget_actuals rolls up every matching transaction ever ingested.
+    starts_on: date = date(2000, 1, 1)
 
 
 class UserConfig(_ConfigModel):
@@ -390,3 +394,67 @@ def load_user_config(config_dir: Path | None = None) -> UserConfig:
     except ValidationError as exc:
         msg = f"invalid configuration in {config_dir}: {exc}"
         raise ConfigurationError(msg) from exc
+
+
+def config_file_names() -> dict[str, str]:
+    """Return the ``{key: filename}`` map of every user-editable config file."""
+    return dict(_CONFIG_FILES)
+
+
+def read_config_file(name: str, config_dir: Path | None = None) -> str:
+    """Return one config file's raw YAML text (empty string if it doesn't exist yet).
+
+    Args:
+        name: A key from :func:`config_file_names`, e.g. ``"rules"``.
+
+    Raises:
+        KeyError: `name` isn't a known config file key.
+    """
+    if config_dir is None:
+        config_dir = get_settings().config_dir
+    path = config_dir / _CONFIG_FILES[name]
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def write_config_file(name: str, content: str, config_dir: Path | None = None) -> None:
+    """Validate and write one config file's raw YAML text (the editor in Phase 6's UI).
+
+    Writes only after re-loading the *whole* user config with `name`'s file
+    replaced by `content` — a single file's edit can still break referential
+    integrity across files (a rule naming a category the edited taxonomy no
+    longer has), so the same cross-file validation `load_user_config` always
+    runs gates every write, not just this file's own schema.
+
+    Args:
+        name: A key from :func:`config_file_names`, e.g. ``"rules"``.
+
+    Raises:
+        KeyError: `name` isn't a known config file key.
+        ConfigurationError: `content` isn't valid YAML, or the resulting
+            configuration fails validation (this file's own schema or
+            cross-file referential integrity).
+    """
+    filename = _CONFIG_FILES[name]
+    if config_dir is None:
+        config_dir = get_settings().config_dir
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        msg = f"{filename}: invalid YAML: {exc}"
+        raise ConfigurationError(msg) from exc
+    if parsed is not None and not isinstance(parsed, list):
+        msg = f"{filename}: expected a top-level list, got {type(parsed).__name__}"
+        raise ConfigurationError(msg)
+
+    raw = {
+        key: (parsed or []) if key == name else _read_yaml_list(config_dir / other_filename)
+        for key, other_filename in _CONFIG_FILES.items()
+    }
+    try:
+        UserConfig.model_validate(raw)
+    except ValidationError as exc:
+        msg = f"invalid configuration in {filename}: {exc}"
+        raise ConfigurationError(msg) from exc
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / filename).write_text(content, encoding="utf-8")
