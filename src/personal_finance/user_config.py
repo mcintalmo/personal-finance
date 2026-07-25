@@ -62,6 +62,10 @@ _CONFIG_FILES: dict[str, str] = {
 class SourceKind(StrEnum):
     CSV = "csv"
     OFX = "ofx"
+    # Enrichment, not a financial account: order-history line items later
+    # matched against a card charge, not a transaction in their own right —
+    # see personal_finance.ingest.amazon_source.
+    AMAZON = "amazon"
 
 
 class SignConvention(StrEnum):
@@ -90,12 +94,17 @@ class SourceConfig(_ConfigModel):
     ``posted_on``, ``description_raw``, ``debit``, ``credit``. ``external_id``
     is always optional. These requirements are enforced only for ``kind: csv``
     — OFX parses the structured format directly and ignores ``column_map``.
+
+    ``account_name``/``account_type`` are required for ``csv``/``ofx`` (a bank
+    or card statement always belongs to one account) but not for ``amazon`` —
+    order-history is enrichment data matched against a charge on whichever
+    account it was paid from, not a statement of its own.
     """
 
     name: str = Field(min_length=1)  # stable identifier, used in provenance
     kind: SourceKind
-    account_name: str = Field(min_length=1)  # display name of the backing account
-    account_type: AccountType
+    account_name: str | None = Field(default=None, min_length=1)  # backing account's display name
+    account_type: AccountType | None = None
     currency: str = "USD"
     column_map: dict[str, str] = Field(default_factory=dict)  # canonical field -> source column
     date_format: str | None = None  # strptime format for date/datetime columns
@@ -104,6 +113,21 @@ class SourceConfig(_ConfigModel):
     skip_rows: int = Field(default=0, ge=0)  # preamble lines to skip before the header
     columns: list[str] | None = None  # positional column names, required if has_header=False
     sign_convention: SignConvention = SignConvention.SIGNED
+
+    @model_validator(mode="after")
+    def _check_account_fields(self) -> SourceConfig:
+        # Denylist (not allowlist): every kind except the enrichment-style
+        # AMAZON requires account fields, so a future account-bound SourceKind
+        # is covered automatically instead of silently passing validation if
+        # its author forgets to add it to an allowlist here.
+        if self.kind != SourceKind.AMAZON and (
+            self.account_name is None or self.account_type is None
+        ):
+            msg = (
+                f"source {self.name!r}: kind {self.kind.value!r} requires account_name/account_type"
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _check_csv_layout(self) -> SourceConfig:

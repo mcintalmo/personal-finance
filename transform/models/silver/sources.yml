@@ -61,3 +61,22 @@ sources:
               union_by_name = true,
               filename = true
             )
+      - name: amazon_order_items
+        description: >-
+          Amazon order-history line items (Retail.OrderHistory.1.csv via
+          personal_finance.ingest.amazon_source), landed in its OWN
+          bronze_amazon dataset — not bronze/amazon/, which the transactions
+          source's bronze/*/*.parquet wildcard would otherwise also sweep up
+          and corrupt with NULL-heavy rows, since an order-history row is not
+          a transaction (a shipment often groups several item rows under one
+          card charge, and its columns share nothing with the generic
+          transaction schema). Unlike bank sources, this path is NOT
+          auto-discovered by glob: it assumes a single Amazon source
+          configured as `name: amazon` in sources.yaml (see
+          config/examples/sources.yaml, docs/source-schemas.md). Documented
+          here for lineage only — NOT read via the source() macro like
+          transactions is: dbt's YAML meta properties render without custom
+          project macros in scope, and this
+          source needs the read_parquet_or_empty macro (most builds never
+          ingest an Amazon file at all) — see stg_amazon_order_items.sql,
+          which calls it directly instead.

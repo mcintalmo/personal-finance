@@ -36,7 +36,8 @@ from watchdog.observers import Observer
 
 from personal_finance.exceptions import IngestionError
 from personal_finance.ingest.dedup import bronze_row_count
-from personal_finance.ingest.pipeline import run_ingestion
+from personal_finance.ingest.pipeline import dataset_name_for, run_ingestion
+from personal_finance.user_config import SourceKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,6 +54,27 @@ DEFAULT_PATTERNS: tuple[str, ...] = ("*.csv", "*.ofx", "*.qfx")
 # Suffix for the in-flight staging file used by deposit_file. It must not match
 # DEFAULT_PATTERNS so the watcher ignores it until the atomic rename completes.
 _STAGING_SUFFIX = ".part"
+
+# Fixed external schemas carry the *exporter's* filename, not the configured
+# source's name — unlike bank CSV/OFX exports, which this project's convention
+# names after their source (see ingest_file's docstring). Amazon's Privacy
+# Central export is always named exactly this, regardless of how the user
+# names their `amazon` source, so stem-based inference alone would never
+# match it.
+_FIXED_EXPORT_FILENAMES: dict[SourceKind, str] = {SourceKind.AMAZON: "Retail.OrderHistory.1.csv"}
+
+
+def _resolve_by_fixed_filename(
+    file_path: Path, sources: dict[str, SourceConfig]
+) -> SourceConfig | None:
+    """Match a fixed-schema export's filename to its (unique) configured source."""
+    for kind, filename in _FIXED_EXPORT_FILENAMES.items():
+        if file_path.name != filename:
+            continue
+        matches = [s for s in sources.values() if s.kind == kind]
+        if len(matches) == 1:
+            return matches[0]
+    return None
 
 
 def deposit_file(src_file: Path, folder: Path, *, name: str | None = None) -> Path:
@@ -100,11 +122,17 @@ def ingest_file(
     """Ingest one export file, resolving its source and reporting row counts.
 
     ``source_name`` forces a source; when ``None`` the source is inferred from
-    the file's stem (``chase_checking.csv`` -> ``chase_checking``). Never
-    raises for a bad file — parse failures come back as a ``FAILED`` outcome.
+    the file's stem (``chase_checking.csv`` -> ``chase_checking``), falling
+    back to matching a fixed-schema exporter's own filename (e.g. Amazon's
+    always-named ``Retail.OrderHistory.1.csv``) against the one configured
+    source of that kind, since such exports aren't named after the source.
+    Never raises for a bad file — parse failures come back as a ``FAILED``
+    outcome.
     """
     resolved = source_name or file_path.stem
     source = sources.get(resolved)
+    if source is None and source_name is None:
+        source = _resolve_by_fixed_filename(file_path, sources)
     if source is None:
         return IngestOutcome(
             file_path,
@@ -112,12 +140,13 @@ def ingest_file(
             IngestStatus.UNMATCHED,
             detail=f"no source config named {resolved!r}",
         )
-    before = bronze_row_count(bronze_dir, source.name)
+    dataset_name = dataset_name_for(source)
+    before = bronze_row_count(bronze_dir, source.name, dataset_name)
     try:
         run_ingestion(source, file_path, bronze_dir)
     except IngestionError as exc:
         return IngestOutcome(file_path, source.name, IngestStatus.FAILED, detail=str(exc))
-    after = bronze_row_count(bronze_dir, source.name)
+    after = bronze_row_count(bronze_dir, source.name, dataset_name)
     return IngestOutcome(
         file_path,
         source.name,

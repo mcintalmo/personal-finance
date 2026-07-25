@@ -5,7 +5,7 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 4 — Categorization
+## Phase 5 — Line items (order history)
 
 > Phase 1 (Foundation) complete — demo verified 2026-07-12.
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
@@ -13,13 +13,23 @@
 > Phase 3 (Core cleaning) complete — demo verified 2026-07-19: `pf transform` → silver
 > transactions/merchants/transfers; the Venmo −X ↔ bank +X pair is linked and excluded from spend;
 > dbt data tests pass on every silver model.
-> **Phase 4 (Categorization) complete** — demo verified 2026-07-22: every dummy transaction
+> Phase 4 (Categorization) complete — demo verified 2026-07-22: every dummy transaction
 > categorized with confidence + provenance across all four cascade stages (rules → embedding
 > similarity → local-LLM fallback → human review), rolled up through the taxonomy at every level.
 
+Costco has no order-history export (confirmed against docs/source-schemas.md — in-app digital
+receipts only), so Phase 5 targets Amazon only for now; Costco (and other photo/PDF-only
+receipts) stays in Phase 9 until vision-LLM parsing exists.
+
+- [x] Amazon order-history CSV ingestion: see Done below.
+- [ ] Amazon order ↔ card-charge matching (amount + date window, deterministic — same shape as
+      silver_transfers)
+- [ ] Transaction decomposition into splits, keyed off matched order line items
+- [ ] Line-item categorization through the same cascade (enables "spend on apples this year")
+
 ## Backlog (later phases)
 
-See [docs/FEATURES.md](docs/FEATURES.md) — Phases 4–8. Tasks are promoted into this file
+See [docs/FEATURES.md](docs/FEATURES.md) — Phases 6–9. Tasks are promoted into this file
 one phase at a time when the previous phase's demo is complete.
 
 **Phase 3 merchant follow-ups** (deferred — evaluate existing tooling before hand-rolling more):
@@ -29,6 +39,43 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Amazon order-history CSV ingestion (Phase 5): lands Retail.OrderHistory.1.csv
+      (Privacy Central export) into its own `bronze_amazon` dataset — not `bronze/`, which the
+      transactions source's `bronze/*/*.parquet` wildcard would otherwise also sweep up and
+      corrupt with NULL-heavy rows, since an order-history row (a shipment-item line, not a
+      statement line) shares no columns with the generic transaction schema. New `SourceKind.AMAZON`
+      (account_name/account_type now optional on `SourceConfig` — enrichment data isn't tied to
+      one financial account); `personal_finance.ingest.amazon_source` (fixed external schema,
+      hardcoded columns like OFX, no `column_map`); `personal_finance.ingest.dedup.compute_amazon_row_hash`
+      (keyed on order + ASIN + ship date + occurrence, since the same ASIN can legitimately repeat
+      across shipments or even within one on a split shipment). `pipeline._run`/`existing_row_hashes`/
+      `bronze_row_count` gained a `dataset_name` parameter (default `"bronze"`, preserving every
+      existing CSV/OFX source's behavior unchanged) so a non-transaction-shaped source can land
+      under a different dataset — `dataset_name_for(source)` centralizes the kind → dataset mapping
+      for `pipeline.py` and `watch.ingest_file`'s row-count reporting alike. New dbt models:
+      `stg_amazon_order_items` (typed/deduped staging) and `silver_amazon_shipments` (grouped by
+      order + ship date to match card-charge granularity — a multi-item order shipped in two boxes
+      is two charges; `total_owed`/`shipping_charge`/`total_discounts` are shipment-level values
+      Amazon repeats on every item row, taken once via `any_value`, never summed). New macro
+      `read_parquet_or_empty`: most builds never ingest an Amazon file at all, and a plain
+      `read_parquet()` on a non-matching glob throws immediately (even just to `CREATE VIEW`) —
+      this checks file existence via `glob()` (compile-time, tolerant of zero matches) and falls
+      back to a correctly-typed empty relation, the same "resolves to zero rows when its upstream
+      hasn't run" contract every other cascade stage follows; called directly in
+      `stg_amazon_order_items.sql` rather than through `source()`, since dbt's sources.yml `meta`
+      properties render without custom project macros in scope. `personal_finance.synth.amazon_orders`
+      generates a correlated Amazon order-history fixture (Amazon-category card charges added to
+      `scenario.py` via an independent `amazon_rng` substream — critically NOT the shared `rng`,
+      since inserting a new draw anywhere in that shared sequence would have shifted every other
+      merchant category's amounts/dates for seed=42 and silently broken dozens of unrelated
+      existing fixtures; caught and fixed during this task). New singular dbt test
+      `assert_amazon_shipment_totals_reconcile`. **Live-verified end-to-end**: `pf synth` → real
+      Amazon CSV with comma-containing product names (correctly quoted, round-trips through the
+      `csv` module) → `pf ingest --source amazon` → `pf transform` (119/119 checks green,
+      including with real ingested Amazon data, not just the empty-glob path) → confirmed
+      `silver_amazon_shipments` aggregates the right item counts/totals and `silver_transactions`
+      has zero NULL `account_name` rows (the bronze-glob-collision bug this task found and fixed
+      via the `dataset_name` parameterization) (2026-07-24).
 - [x] Merchant resolution for the outlier tail (Phase 3 follow-up): embedding-similarity
       merge-candidate review queue, human-confirmed only — mis-merging two distinct real
       merchants silently corrupts spend history in a way a wrong category doesn't, so

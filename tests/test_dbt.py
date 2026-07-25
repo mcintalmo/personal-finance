@@ -19,7 +19,12 @@ from personal_finance.embed import merchant_embedding_id
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id
 from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
-from personal_finance.synth import generate_scenario, write_scenario
+from personal_finance.synth import (
+    generate_amazon_orders,
+    generate_scenario,
+    write_amazon_orders,
+    write_scenario,
+)
 from personal_finance.user_config import (
     MerchantAliasConfig,
     RuleApplyField,
@@ -1354,3 +1359,98 @@ class TestGoldCategoryRollupsMultiLevel:
                 ).fetchone()
                 assert actual[0] == expected[0], path
                 assert actual[1] == expected[1], path
+
+
+@pytest.fixture(scope="module")
+def amazon_warehouse(tmp_path_factory):
+    """A self-contained warehouse with both bank and Amazon order-history
+    data ingested — proves silver_amazon_shipments aggregates real generated
+    order-history rows correctly (the empty-glob-safe path is covered
+    separately in TestDbtBuild's default `built_warehouse`, which never
+    ingests Amazon data at all).
+    """
+    root = tmp_path_factory.mktemp("wh_amazon")
+    warehouse = root / "warehouse.duckdb"
+    bronze = root / "bronze"
+    config = load_user_config(EXAMPLES_CONFIG_DIR)
+    sources = {s.name: s for s in config.sources}
+
+    scenario = generate_scenario(seed=42, months=2)
+    exports = root / "exports"
+    write_scenario(scenario, exports)
+    run_ingestion(sources["chase_checking"], exports / "chase_checking.csv", bronze)
+
+    orders = generate_amazon_orders(scenario, seed=42)
+    amazon_dir = root / "amazon"
+    write_amazon_orders(orders, amazon_dir)
+    run_ingestion(sources["amazon"], amazon_dir / "Retail.OrderHistory.1.csv", bronze)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        create_schema(conn)
+        seed_categories(conn, config.taxonomy)
+        seed_rules(conn, config.rules)
+        seed_merchant_aliases(conn, config.merchant_aliases)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from dbt.cli.main import dbtRunner
+
+            result = dbtRunner().invoke(
+                [
+                    "build",
+                    "--project-dir",
+                    str(REPO_ROOT / "transform"),
+                    "--profiles-dir",
+                    str(REPO_ROOT / "transform"),
+                ]
+            )
+    finally:
+        monkeypatch.undo()
+    assert result.success, f"dbt build failed: {result.exception}"
+    return warehouse, scenario, orders
+
+
+class TestSilverAmazonShipments:
+    def test_one_row_per_shipment(self, amazon_warehouse):
+        warehouse, _scenario, orders = amazon_warehouse
+        expected_shipments = {(o.website_order_id, o.ship_date) for o in orders}
+        with duckdb.connect(str(warehouse)) as conn:
+            (count,) = conn.execute(
+                "select count(*) from main_silver.silver_amazon_shipments"
+            ).fetchone()
+        assert count == len(expected_shipments) > 0
+
+    def test_total_owed_matches_source_transactions(self, amazon_warehouse):
+        warehouse, scenario, _orders = amazon_warehouse
+        by_id = {t.external_id: -t.amount for t in scenario.credit.transactions}
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select website_order_id, ship_date, total_owed "
+                "from main_silver.silver_amazon_shipments"
+            ).fetchall()
+        assert rows
+        # Every shipment's total_owed must equal SOME Amazon charge's amount —
+        # the exact mapping back to a transaction_external_id isn't stored in
+        # silver (that's the not-yet-built matching stage), so check
+        # membership in the set of real charge amounts rather than a 1:1 join.
+        charge_amounts = set(by_id.values())
+        for _order_id, _ship_date, total_owed in rows:
+            assert total_owed in charge_amounts
+
+    def test_item_count_matches_generated_line_items(self, amazon_warehouse):
+        warehouse, _scenario, orders = amazon_warehouse
+        by_shipment: dict[tuple[str, object], int] = {}
+        for order in orders:
+            key = (order.website_order_id, order.ship_date)
+            by_shipment[key] = by_shipment.get(key, 0) + 1
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select website_order_id, ship_date, item_count "
+                "from main_silver.silver_amazon_shipments"
+            ).fetchall()
+        for order_id, ship_date, item_count in rows:
+            assert item_count == by_shipment[order_id, ship_date]

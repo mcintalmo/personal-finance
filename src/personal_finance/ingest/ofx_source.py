@@ -84,6 +84,7 @@ def ofx_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRo
         IngestionError: If the file cannot be parsed (raised eagerly by
             ``read_ofx_transactions`` on the first pull).
     """
+    assert source.account_type is not None, "SourceConfig requires account_type for kind=ofx"
     ingested_at = datetime.now(UTC)
     for parsed in read_ofx_transactions(source.name, file_path):
         yield {

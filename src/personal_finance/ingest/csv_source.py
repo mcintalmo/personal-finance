@@ -123,6 +123,7 @@ def csv_transactions(source: SourceConfig, file_path: Path) -> Iterator[BronzeRo
     Raises:
         IngestionError: If any row cannot be parsed.
     """
+    assert source.account_type is not None, "SourceConfig requires account_type for kind=csv"
     ingested_at = datetime.now(UTC)
     occurrence_counts: dict[tuple[object, ...], int] = {}
     for raw_row in read_rows(source, file_path):

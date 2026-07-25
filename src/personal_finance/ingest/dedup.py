@@ -64,14 +64,42 @@ def compute_row_hash(
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def _bronze_glob(bronze_dir: Path, table_name: str) -> str:
-    return f"{bronze_dir}/bronze/{table_name}/*.parquet"
+def compute_amazon_row_hash(
+    source_name: str,
+    website_order_id: str,
+    asin: str,
+    ship_date: date,
+    occurrence: int = 0,
+) -> str:
+    """Return the deterministic idempotency key for one Amazon order-item row.
+
+    Amazon order-history has no single-column stable id like OFX's FITID: the
+    natural key is (order, item, shipment) — the same ASIN can legitimately
+    repeat within one order across separate shipments, so ``ship_date`` scopes
+    it, and ``occurrence`` (the Nth row so far sharing that exact key within
+    one ingest batch) covers the rarer case of the same item shipping twice on
+    the same day within one order (e.g. a split shipment of a multi-quantity
+    line).
+    """
+    key = f"{source_name}|amazon|{website_order_id}|{asin}|{ship_date.isoformat()}|{occurrence}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def existing_row_hashes(bronze_dir: Path, table_name: str) -> set[str]:
+def _bronze_glob(bronze_dir: Path, table_name: str, dataset_name: str = "bronze") -> str:
+    return f"{bronze_dir}/{dataset_name}/{table_name}/*.parquet"
+
+
+def existing_row_hashes(
+    bronze_dir: Path, table_name: str, dataset_name: str = "bronze"
+) -> set[str]:
     """Return the ``row_hash`` values already landed for a source.
 
     Empty on the first ingest, when no Parquet file exists yet for the table.
+    ``dataset_name`` defaults to the shared "bronze" dataset every
+    transaction-shaped CSV/OFX source lands in; a source landed under a
+    different dataset (e.g. Amazon order-history — see
+    ``personal_finance.ingest.amazon_source``) must pass the same one it was
+    ingested with.
     """
     with duckdb.connect() as conn:
         try:
@@ -79,7 +107,7 @@ def existing_row_hashes(bronze_dir: Path, table_name: str) -> set[str]:
             # break the query.
             rows = conn.execute(
                 "select distinct row_hash from read_parquet(?)",
-                [_bronze_glob(bronze_dir, table_name)],
+                [_bronze_glob(bronze_dir, table_name, dataset_name)],
             ).fetchall()
         except duckdb.IOException:
             # No files match the glob yet — nothing has been ingested for
@@ -88,13 +116,13 @@ def existing_row_hashes(bronze_dir: Path, table_name: str) -> set[str]:
     return {row[0] for row in rows}
 
 
-def bronze_row_count(bronze_dir: Path, table_name: str) -> int:
+def bronze_row_count(bronze_dir: Path, table_name: str, dataset_name: str = "bronze") -> int:
     """Return how many rows have landed for a source; 0 before the first ingest."""
     with duckdb.connect() as conn:
         try:
             result = conn.execute(
                 "select count(*) from read_parquet(?)",
-                [_bronze_glob(bronze_dir, table_name)],
+                [_bronze_glob(bronze_dir, table_name, dataset_name)],
             ).fetchone()
         except duckdb.IOException:
             return 0

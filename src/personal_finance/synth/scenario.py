@@ -37,6 +37,13 @@ DINING_MERCHANTS: tuple[tuple[str, str], ...] = (
     ("STARBUCKS #9985", "Dining"),
     ("THAI GINGER BELLEVUE", "Dining"),
 )
+# Real Amazon card descriptors carry a per-order code suffix that varies every
+# charge (unlike a fixed store number) — normalize_merchant strips the
+# "AMZN MKTP US*" prefix but the remaining suffix still varies, which is
+# realistic: Amazon-order matching (Phase 5) correlates by amount + date, not
+# by a clean collapsed merchant name.
+AMAZON_DESCRIPTION_PREFIX = "AMZN MKTP US*"
+AMAZON_CATEGORY_HINT = "Shopping"
 # (description, category, monthly amount, day of month)
 SUBSCRIPTIONS: tuple[tuple[str, str, Decimal, int], ...] = (
     ("NETFLIX.COM", "Entertainment", Decimal("15.49"), 7),
@@ -96,6 +103,12 @@ def _add_months(day: date, months: int) -> date:
     return date(day.year + year_delta, month + 1, 1)
 
 
+def _amazon_order_code(rng: Random) -> str:
+    """A realistic-looking per-order suffix, e.g. ``2K3L4M5N6``."""
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return "".join(rng.choice(alphabet) for _ in range(9))
+
+
 def generate_scenario(seed: int = 42, start: date | None = None, months: int = 6) -> Scenario:
     """Generate a deterministic scenario.
 
@@ -108,6 +121,12 @@ def generate_scenario(seed: int = 42, start: date | None = None, months: int = 6
         start = date(2026, 1, 1)
     start = start.replace(day=1)
     rng = Random(seed)
+    # Amazon draws use their own independent stream rather than sharing `rng`:
+    # every existing fixture (grocery/gas/dining occurrences, amounts, dates)
+    # is pinned to `rng`'s exact call sequence for seed=42, and inserting a
+    # new draw anywhere in that sequence would shift everything after it,
+    # silently breaking every other test's determinism.
+    amazon_rng = Random(f"{seed}:amazon")
 
     checking = SynthAccount("Chase Checking", "checking")
     credit = SynthAccount("Chase Sapphire", "credit_card")
@@ -186,6 +205,17 @@ def generate_scenario(seed: int = 42, start: date | None = None, months: int = 6
             if rng.random() < 0.12:
                 description, category = rng.choice(DINING_MERCHANTS)
                 add(credit, "CRD", day, -_cents(rng, 900, 6500), description, "purchase", category)
+            if amazon_rng.random() < 0.08:
+                description = AMAZON_DESCRIPTION_PREFIX + _amazon_order_code(amazon_rng)
+                add(
+                    credit,
+                    "CRD",
+                    day,
+                    -_cents(amazon_rng, 1000, 12000),
+                    description,
+                    "purchase",
+                    AMAZON_CATEGORY_HINT,
+                )
 
         # Card payment on the 25th: pay this month's purchases in full.
         month_spend = -sum(

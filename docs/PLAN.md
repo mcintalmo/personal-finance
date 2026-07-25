@@ -13,7 +13,7 @@
 | 2 | **Ingestion** — dlt pipelines (CSV, OFX), bronze Parquet, watch-folder, idempotency | Drop a fake bank export in a folder → rows appear in bronze with provenance; re-drop → no dupes |
 | 3 | **Core cleaning** — dedup, normalization, merchant cleaning, transfer detection | Silver tables with clean transactions; the Venmo +320 / bank −320 pair is linked and excluded from spend; dbt tests pass |
 | 4 | **Categorization** — rules → embeddings → LLM cascade, review queue backend, labels | Every dummy transaction categorized with confidence + provenance (which cascade stage); corrections persist |
-| 5 | **Line items (order history)** — Amazon/Costco order-history ingestion, order↔charge matching, splits | A fake Amazon order-history export → line items attached to the matching card charge → "apples" queryable |
+| 5 | **Line items (order history)** — Amazon order-history ingestion, order↔charge matching, splits (Costco has no export — deferred to Phase 9's vision-LLM path) | A fake Amazon order-history export → line items attached to the matching card charge → "apples" queryable |
 | 6 | **Serving** — FastAPI, Streamlit dashboards (sunburst, Sankey), budgets, review-queue UI, config editing | Working local web app over dummy data: drill from total spend to line items; edit a budget; approve a categorization |
 | 7 | **Intelligence** — NL chat, recurring detection, forecasting, trend callouts | Ask "how much did I spend on groceries last month?" in chat and get a correct, mart-backed answer |
 | 8 | **Automation & polish** — Dagster, email ingestion, optional SimpleFIN/Superset, encryption, hardening | End-to-end hands-off: new file → scheduled pipeline → dashboard updates; security pass complete |

@@ -11,7 +11,11 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from personal_finance.ingest.dedup import compute_row_hash, existing_row_hashes
+from personal_finance.ingest.dedup import (
+    compute_amazon_row_hash,
+    compute_row_hash,
+    existing_row_hashes,
+)
 from personal_finance.ingest.pipeline import run_ingestion
 from personal_finance.synth import generate_scenario, write_scenario
 from personal_finance.user_config import SourceConfig, load_user_config
@@ -101,6 +105,39 @@ class TestComputeRowHash:
             "s", date(2026, 1, 1), Decimal("-1.00"), "X", "FIT1", account_id=None
         )
         assert with_default == explicit_none
+
+
+class TestComputeAmazonRowHash:
+    def test_same_key_same_hash(self):
+        a = compute_amazon_row_hash("amazon", "111-1-1", "B000000000", date(2026, 1, 1))
+        b = compute_amazon_row_hash("amazon", "111-1-1", "B000000000", date(2026, 1, 1))
+        assert a == b
+
+    def test_different_asin_different_hash(self):
+        a = compute_amazon_row_hash("amazon", "111-1-1", "B000000000", date(2026, 1, 1))
+        b = compute_amazon_row_hash("amazon", "111-1-1", "B111111111", date(2026, 1, 1))
+        assert a != b
+
+    def test_different_ship_date_different_hash(self):
+        """The same ASIN in the same order can legitimately ship on two
+        different dates (a split shipment) — must not collide."""
+        a = compute_amazon_row_hash("amazon", "111-1-1", "B000000000", date(2026, 1, 1))
+        b = compute_amazon_row_hash("amazon", "111-1-1", "B000000000", date(2026, 1, 2))
+        assert a != b
+
+    def test_occurrence_distinguishes_same_day_repeat(self):
+        first = compute_amazon_row_hash(
+            "amazon", "111-1-1", "B000000000", date(2026, 1, 1), occurrence=0
+        )
+        second = compute_amazon_row_hash(
+            "amazon", "111-1-1", "B000000000", date(2026, 1, 1), occurrence=1
+        )
+        assert first != second
+
+    def test_source_name_scopes_the_hash(self):
+        a = compute_amazon_row_hash("amazon", "111-1-1", "B000000000", date(2026, 1, 1))
+        b = compute_amazon_row_hash("amazon2", "111-1-1", "B000000000", date(2026, 1, 1))
+        assert a != b
 
 
 class TestExistingRowHashes:

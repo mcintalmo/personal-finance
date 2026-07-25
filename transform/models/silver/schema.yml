@@ -269,6 +269,30 @@ models:
       - name: transaction_count
         data_tests: [not_null]
 
+  - name: silver_amazon_shipments
+    description: >-
+      One row per Amazon shipment — matching card-charge granularity, not per
+      order or per line item (docs/source-schemas.md's matching note): a
+      multi-item order shipped in two boxes produces two separate card
+      charges. Order↔charge matching against silver_transactions and split
+      decomposition are later Phase 5 stages, not built on top of this model
+      yet.
+    columns:
+      - name: website_order_id
+        data_tests: [not_null]
+      - name: ship_date
+        data_tests: [not_null]
+      - name: order_date
+        data_tests: [not_null]
+      - name: total_owed
+        description: The shipment-level charge amount (repeated per item row upstream, taken once here).
+        data_tests: [not_null]
+      - name: items_subtotal
+        description: Sum of this shipment's item subtotals (pre-tax).
+        data_tests: [not_null]
+      - name: item_count
+        data_tests: [not_null]
+
   - name: silver_categories
     description: Cleaned category taxonomy (one row per category node).
     columns:
