@@ -43,6 +43,7 @@ CATALOG: tuple[tuple[str, str], ...] = (
     ("B08F7PTF53", "Ninja Foodi Digital Air Fryer"),
     ("B09B8V1LZ3", "Bounty Paper Towels, 12 Rolls"),
     ("B0012J3WNK", "Tide Laundry Detergent, 100 oz"),
+    ("B0FRESHAPL", "Organic Gala Apples, 3 lb Bag"),
 )
 
 

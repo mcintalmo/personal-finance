@@ -1509,3 +1509,127 @@ class TestSilverAmazonOrderMatches:
             ).fetchall()
         assert rows
         assert all(day_gap == 0 for (day_gap,) in rows)
+
+
+class TestSilverAmazonSplits:
+    def test_one_split_per_line_item(self, amazon_warehouse):
+        warehouse, _scenario, orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (count,) = conn.execute(
+                "select count(*) from main_silver.silver_amazon_splits"
+            ).fetchone()
+        assert count == len(orders) > 0
+
+    def test_proportional_allocation_rounds_half_cent_boundary_correctly(self):
+        # Regression guard for a real bug found in review: `charge * item /
+        # shipment` can land exactly on a half-cent boundary (185.64 * 3.72 /
+        # 5.44 = 126.945 exactly), where DOUBLE/DECIMAL division rounds the
+        # wrong way due to binary floating-point approximation (it produced
+        # 126.94, not the correct 126.95) — even though the model's overall
+        # sum-to-transaction-amount invariant still held, since the remainder
+        # step absorbs any per-item error into the last item. This runs the
+        # model's exact integer-cents formula directly (not the full dbt
+        # build) against that adversarial input.
+        with duckdb.connect() as conn:
+            (rounded_cents,) = conn.execute(
+                """
+                with cents as (
+                    select
+                        cast(round(185.64 * 100) as bigint) as charge_cents,
+                        cast(round(3.72 * 100) as bigint) as item_cents,
+                        cast(round(5.44 * 100) as bigint) as shipment_cents
+                )
+                select (charge_cents * item_cents + shipment_cents // 2) // shipment_cents
+                from cents
+                """
+            ).fetchone()
+        assert rounded_cents == 12695  # $126.95, not $126.94
+
+    def test_splits_sum_to_exact_transaction_amount(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select s.transaction_id, sum(s.amount), any_value(t.amount) "
+                "from main_silver.silver_amazon_splits s "
+                "join main_silver.silver_transactions t using (transaction_id) "
+                "group by s.transaction_id"
+            ).fetchall()
+        assert rows
+        for _transaction_id, split_total, charge_amount in rows:
+            assert split_total == charge_amount
+
+    def test_multi_item_shipment_splits_proportionally(self, amazon_warehouse):
+        # A shipment with items of different subtotals should not just divide
+        # the charge evenly — each split's magnitude should track its item's
+        # (subtotal + tax) share, confirming proportional (not flat) allocation.
+        warehouse, _scenario, orders = amazon_warehouse
+        multi_item_orders: dict[str, list] = {}
+        for order in orders:
+            multi_item_orders.setdefault(order.website_order_id, []).append(order)
+        website_order_id, items = next(
+            (oid, items) for oid, items in multi_item_orders.items() if len(items) > 1
+        )
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select s.asin, s.amount from main_silver.silver_amazon_splits s "
+                "join main_silver.silver_amazon_order_matches m using (transaction_id) "
+                "where m.website_order_id = $order_id",
+                {"order_id": website_order_id},
+            ).fetchall()
+        by_asin = dict(rows)
+        largest_item = max(
+            items, key=lambda o: o.shipment_item_subtotal + o.shipment_item_subtotal_tax
+        )
+        smallest_item = min(
+            items, key=lambda o: o.shipment_item_subtotal + o.shipment_item_subtotal_tax
+        )
+        assert abs(by_asin[largest_item.asin]) >= abs(by_asin[smallest_item.asin])
+
+
+class TestSilverSplitCategories:
+    def test_apple_line_items_are_categorized(self, amazon_warehouse):
+        # The demo goal this whole phase is building toward (docs/PLAN.md):
+        # "how much have I spent this year on apples" answerable at the
+        # line-item level, not just per-charge.
+        warehouse, _scenario, orders = amazon_warehouse
+        apple_items = [o for o in orders if "apple" in o.product_name.lower()]
+        assert apple_items, "fixture must include an apple line item for this test to mean anything"
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select cat.name, sc.categorization_source, sc.categorization_confidence "
+                "from main_silver.silver_split_categories sc "
+                "join main_silver.silver_amazon_splits s using (split_id) "
+                "join main_silver.silver_categories cat on cat.id = sc.category_id "
+                "where s.product_name = 'Organic Gala Apples, 3 lb Bag'"
+            ).fetchall()
+        assert len(rows) == len(apple_items)
+        for name, source, confidence in rows:
+            assert name == "apples"
+            assert source == "rule"
+            assert confidence == pytest.approx(1.0)
+
+    def test_non_matching_product_names_are_uncategorized(self, amazon_warehouse):
+        # Nothing in rules.yaml matches "Echo Dot"/"Bounty"/etc. — confirming
+        # the "absent = uncategorized" contract, same as the transaction cascade.
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select s.split_id from main_silver.silver_amazon_splits s "
+                "where s.product_name not like '%Apple%' "
+                "and s.split_id not in (select split_id from main_silver.silver_split_categories)"
+            ).fetchall()
+            (total_non_apple,) = conn.execute(
+                "select count(*) from main_silver.silver_amazon_splits "
+                "where product_name not like '%Apple%'"
+            ).fetchone()
+        assert len(rows) == total_non_apple > 0
+
+    def test_split_category_ids_resolve_to_real_categories(self, amazon_warehouse):
+        warehouse, _scenario, _orders = amazon_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            (orphans,) = conn.execute(
+                "select count(*) from main_silver.silver_split_categories sc "
+                "left join main_silver.silver_categories cat on cat.id = sc.category_id "
+                "where cat.id is null"
+            ).fetchone()
+        assert orphans == 0

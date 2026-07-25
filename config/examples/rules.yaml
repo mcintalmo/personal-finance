@@ -4,7 +4,9 @@
 # — see RuleConfig) matched against `applies_to` (default: merchant_name, the
 # normalize_merchant-cleaned key — less noisy than the raw description, so
 # patterns below need fewer variants). Other valid values: description_raw,
-# source, account_name.
+# source, account_name (all transaction fields, silver_transaction_categories)
+# and product_name (a line-item split field, silver_split_categories — the
+# two applies_to universes are mutually exclusive by field name).
 
 - pattern: "(?i)trader joe|kroger|safeway|aldi"
   category: essentials/groceries
@@ -17,3 +19,7 @@
 
 - pattern: "(?i)payroll|direct dep"
   category: income/salary
+
+- pattern: "(?i)apple"
+  category: essentials/groceries/apples
+  applies_to: product_name

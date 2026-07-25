@@ -194,20 +194,32 @@ def _validate_duckdb_regex(value: str) -> str:
 
 
 class RuleApplyField(StrEnum):
-    """Transaction fields a rule's pattern may be matched against."""
+    """Fields a rule's pattern may be matched against.
+
+    The first four are transaction fields, consumed by
+    silver_transaction_categories.sql. ``product_name`` is a line-item split
+    field instead — a rule targeting it is consumed by
+    silver_split_categories.sql, not the transaction model; the two are
+    mutually exclusive by field name, so one `rules` table serves both.
+    """
 
     DESCRIPTION_RAW = "description_raw"
     MERCHANT_NAME = "merchant_name"
     SOURCE = "source"
     ACCOUNT_NAME = "account_name"
+    PRODUCT_NAME = "product_name"
 
 
 class RuleConfig(_ConfigModel):
     """A deterministic categorization rule: regex match → category path.
 
-    Rules are applied in file order (first match wins) against
-    ``silver_transactions`` by the ``silver_transaction_categories`` dbt model —
-    see transform/models/silver/silver_transaction_categories.sql.
+    Rules are applied in file order (first match wins). A rule targeting a
+    transaction field (``description_raw``/``merchant_name``/``source``/
+    ``account_name``) is applied against ``silver_transactions`` by the
+    ``silver_transaction_categories`` dbt model; a rule targeting
+    ``product_name`` (the one split field) is applied against
+    ``silver_amazon_splits`` by ``silver_split_categories`` instead — see
+    ``RuleApplyField``.
     """
 
     # Regular expression, matched case-sensitively by default — prepend (?i)

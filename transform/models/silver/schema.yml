@@ -296,8 +296,7 @@ models:
     description: >-
       One row per matched (Amazon shipment, card charge) pair — deterministic
       amount + date matching, same shape as silver_transfers. Split
-      decomposition (attaching line items to the matched charge) is a later
-      Phase 5 stage, not built on top of this model yet.
+      decomposition (silver_amazon_splits) is built on top of this model.
     columns:
       - name: order_match_id
         data_tests: [unique, not_null]
@@ -322,6 +321,69 @@ models:
         data_tests: [not_null]
       - name: day_gap
         description: Absolute days between ship_date and the charge's posted_on.
+        data_tests: [not_null]
+
+  - name: silver_amazon_splits
+    description: >-
+      Transaction decomposition into splits (docs/ARCHITECTURE.md's
+      transaction_splits concept), keyed off matched Amazon order line items —
+      only matched shipments decompose here. Line items are allocated
+      proportionally to their (subtotal + tax) share of the transaction's
+      amount, with the last item (by split_id) absorbing the rounding
+      remainder, so splits sum to exactly the transaction amount per
+      transaction_id (assert_amazon_splits_sum_to_transaction_amount).
+    columns:
+      - name: split_id
+        data_tests: [unique, not_null]
+      - name: transaction_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: asin
+        data_tests: [not_null]
+      - name: quantity
+        data_tests: [not_null]
+      - name: amount
+        description: This split's share of the transaction amount (same sign convention).
+        data_tests: [not_null]
+
+  - name: silver_split_categories
+    description: >-
+      Line-item categorization — the rules-based cascade stage 1 also used for
+      transactions (silver_transaction_categories), applied to
+      silver_amazon_splits.product_name instead of merchant_name. A split
+      absent here is uncategorized by this stage; embedding/LLM/human-review
+      stages mirroring the transaction cascade are follow-up work, not built
+      yet.
+    columns:
+      - name: split_id
+        description: One row per matched split; absent = not matched by any product_name rule.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_amazon_splits')
+                field: split_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: rule_id
+        data_tests: [not_null]
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule]
+      - name: categorization_confidence
         data_tests: [not_null]
 
   - name: silver_categories
