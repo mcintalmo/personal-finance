@@ -31,7 +31,7 @@ Costco has no order-history export (confirmed against docs/source-schemas.md —
 receipts only), so Phase 5 targeted Amazon only; Costco (and other photo/PDF-only receipts) stays
 in Phase 9 until vision-LLM parsing exists.
 
-- [ ] ⏳ IN PROGRESS Recurring-expense detection (heuristic dbt model: merchant + amount + cadence)
+- [x] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence): see Done below.
 - [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
 - [ ] Forecasting of spend/income (statsforecast)
 - [ ] Trend and anomaly callouts on the dashboard
@@ -76,6 +76,23 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stage 1 — Recurring-expense detection: new `gold_recurring_expenses` dbt model
+      groups outflows by `(merchant_name, amount)`, requires >= 3 occurrences, and classifies the
+      average gap between charges into a weekly/monthly/quarterly/yearly cadence bucket, dropping
+      groups whose gaps are irregular (stddev > `recurring_regularity_threshold` of the average).
+      Reads `silver_transactions` directly (not `gold_line_items`) — a subscription charge is a
+      whole-transaction concept tied to merchant_name, same rationale as `gold_monthly_flow`.
+      Cadence day-ranges and the regularity threshold are dbt vars (`transform/dbt_project.yml`),
+      matching the project's established tunable-heuristic convention (`transfer_window_days`,
+      `embedding_confidence_threshold`). Verified against a 6-month synth warehouse: correctly
+      detects the fixture's monthly rent/Netflix/Spotify charges (6 occurrences each) and correctly
+      excludes random-amount grocery/gas/dining/Amazon spend, payroll (inflow), and the
+      checking↔credit-card autopay transfer legs. Code review (8-angle) found and fixed a missing
+      `'|'` separator in the `recurring_expense_id` hash (two angles converged on it independently)
+      and a test-coverage gap on two derived columns; two lower-severity heuristic-fragility
+      findings (weak evidence at the 3-occurrence floor, no per-account partitioning) were reported
+      and left as-is — real but out of scope for this heuristic's first cut.
 
 - [x] Phase 6 — Serving: `personal_finance.api` (FastAPI) over the gold marts, and
       `personal_finance.webapp` (Streamlit + Plotly), wired together by two new CLI commands
