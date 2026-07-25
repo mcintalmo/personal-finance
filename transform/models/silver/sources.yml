@@ -67,7 +67,9 @@ sources:
           Spend/income forecasts computed by personal_finance.forecast
           (`pf forecast`) — one row per (series, forecast month), each split
           into a deterministic committed component (recurring charges
-          projected forward) and a statistically modelled variable component.
+          projected forward on each group's own cadence) and a
+          statistically modelled variable component. Only outflows have a
+          committed part — recurring detection does not cover income.
           Fully recomputed each run, not incrementally cached: new
           transactions change the history every model was fit to, so a stale
           row is simply wrong. Published as gold_forecasts (Phase 7).

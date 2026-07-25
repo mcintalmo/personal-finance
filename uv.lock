@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-07-18T18:20:07.742699Z"
+exclude-newer = "2026-07-18T18:34:09.804799Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -1040,6 +1040,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "scipy" },
     { name = "statsmodels" },
     { name = "streamlit" },
     { name = "typer" },
@@ -1068,6 +1069,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "scipy", specifier = ">=1.18.0" },
     { name = "statsmodels", specifier = ">=0.14.6" },
     { name = "streamlit", specifier = ">=1.59.2" },
     { name = "typer", specifier = ">=0.26.8" },

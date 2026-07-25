@@ -470,13 +470,16 @@ def forecast(
 
     with duckdb.connect(str(warehouse)) as conn:
         _require_transform_built(conn)
+        # forecast reads the gold layer, not just silver — a partially-built
+        # warehouse would otherwise fail with a raw CatalogException.
+        _require_gold_built(conn, "gold_recurring_expenses")
+        _require_gold_built(conn, "gold_line_items")
+        _require_gold_built(conn, "gold_category_ancestors")
         written = compute_forecasts(conn, horizon=horizon, interval_level=interval)
+        reason = "" if written else _no_forecast_reason(conn)
 
     if not written:
-        typer.echo(
-            f"No forecasts written — every series has fewer than {MIN_HISTORY_MONTHS} "
-            "complete months of history. Ingest more data and re-run."
-        )
+        typer.echo(f"No forecasts written — {reason}")
         return
     typer.echo(
         f"Wrote {written} forecast row(s) at {interval}% interval. "
@@ -562,6 +565,44 @@ def _require_transform_built(conn: duckdb.DuckDBPyConnection, kind: str = "trans
     if not result or not result[0]:
         typer.echo(f"{table} has not been built yet — run `pf transform` first.", err=True)
         raise typer.Exit(code=1)
+
+
+def _require_gold_built(conn: duckdb.DuckDBPyConnection, table: str) -> None:
+    result = conn.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = 'main_gold' AND table_name = $table",
+        {"table": table},
+    ).fetchone()
+    if not result or not result[0]:
+        typer.echo(f"{table} has not been built yet — run `pf transform` first.", err=True)
+        raise typer.Exit(code=1)
+
+
+def _no_forecast_reason(conn: duckdb.DuckDBPyConnection) -> str:
+    """Explain why nothing was forecast.
+
+    `compute_forecasts` returning 0 has several distinct causes, and reporting
+    the wrong one sends the user to fix the wrong thing — telling someone with
+    an empty warehouse to "ingest more months" is actively misleading.
+    """
+    transactions = conn.execute("SELECT count(*) FROM main_silver.silver_transactions").fetchone()
+    if not transactions or not transactions[0]:
+        return "the warehouse has no transactions yet. Run `pf ingest` first."
+    months_row = conn.execute(
+        "SELECT count(DISTINCT date_trunc('month', posted_on)) "
+        "FROM main_silver.silver_transactions "
+        "WHERE posted_on < date_trunc('month', current_date)"
+    ).fetchone()
+    complete_months = months_row[0] if months_row else 0
+    if not complete_months:
+        return (
+            "every transaction falls in the current, incomplete month. "
+            "Forecasting only uses complete months, so there is nothing to fit yet."
+        )
+    return (
+        f"every series has fewer than {MIN_HISTORY_MONTHS} complete months of history "
+        f"({complete_months} so far). Ingest more data and re-run."
+    )
 
 
 def _validate_kind(kind: str) -> None:

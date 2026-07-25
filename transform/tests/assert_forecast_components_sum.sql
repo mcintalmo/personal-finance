@@ -5,9 +5,14 @@
 -- variable" breakdown the UI shows would no longer add up to the headline
 -- number it sits under. Fails (returns rows) if either invariant breaks.
 --
--- The sum is compared exactly, not with a tolerance: all three columns are
--- DECIMAL(18,2) written from the same quantized Python Decimals, so there is
--- no float error to absorb here.
+-- The sum is compared exactly, not with a tolerance, because
+-- personal_finance.forecast builds predicted_amount by ADDING THE QUANTIZED
+-- parts rather than quantizing their float sum. That distinction matters:
+-- quantizing the sum lets both halves round up while the total rounds down
+-- (0.125 + 0.125 -> 0.26 vs 0.25), which would break this test by a cent on
+-- ordinary data. A pydantic validator on Forecast now enforces the same
+-- invariant at construction, so this is the second line of defence rather
+-- than the first.
 
 select
     forecast_id,

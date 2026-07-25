@@ -11,6 +11,11 @@ forecasts them separately and adds the results:
 * **Variable** — everything else. This is the only genuinely uncertain part,
   and the only part a statistical model is asked to predict.
 
+``gold_recurring_expenses`` detects outflows only, so the income series has
+no committed component and is modelled in full. That is a real limitation,
+not an oversight: a salary is highly predictable and would benefit from the
+same treatment if recurring detection is ever extended to inflows.
+
 Modelling the aggregate directly would blend a near-deterministic series with
 a noisy one, inflate the interval on categories that are mostly subscriptions,
 and produce a number nobody can interrogate. The decomposition instead yields
@@ -33,12 +38,13 @@ grain over a personal ledger:
 
 from __future__ import annotations
 
+import calendar
 import logging
 import math
 import statistics
 import warnings
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -63,11 +69,36 @@ MAX_HORIZON = 6
 DEFAULT_INTERVAL_LEVEL = 80
 """Prediction-interval coverage, in percent."""
 
+_INTERVAL_FLOOR_FRACTION = 0.5
+"""Floor the conformal half-width at this fraction of the series' typical
+month-to-month movement. A near-linear history drives backtest residuals to
+~0, which would otherwise publish an extrapolation several months out as a
+zero-width 80% interval — maximal confidence exactly where it is least earned.
+Fitting history perfectly is not the same as knowing the trend continues."""
+
 _TREND_RELATIVE_THRESHOLD = 0.10
 """Annualized slope must exceed 10% of the series mean to count as a trend
 rather than noise — keeps a single expensive month from reading as RISING."""
 
 _CENT = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class RecurringGroup:
+    """One detected recurring charge, as published by gold_recurring_expenses.
+
+    ``amount`` is a positive magnitude and ``avg_gap_days`` is the observed
+    spacing between charges — which is what makes cadence-aware projection
+    possible: a yearly premium lands in one specific future month, not smeared
+    across every month of the horizon.
+    """
+
+    merchant_name: str
+    amount: float
+    cadence: str  # weekly | monthly | quarterly | yearly
+    avg_gap_days: float
+    last_seen_on: date
+    category_id: str | None
 
 
 @dataclass(frozen=True)
@@ -86,6 +117,18 @@ class SeriesHistory:
     months: tuple[date, ...]
     committed: tuple[float, ...]
     variable: tuple[float, ...]
+    # The recurring charges that make up this series' committed component.
+    # Carried alongside the history so the forward projection can use each
+    # group's own cadence instead of collapsing them to a monthly average.
+    recurring: tuple[RecurringGroup, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not (len(self.months) == len(self.committed) == len(self.variable)):
+            message = (
+                f"parallel series must be equal length: {len(self.months)} months, "
+                f"{len(self.committed)} committed, {len(self.variable)} variable"
+            )
+            raise ValueError(message)
 
     @property
     def totals(self) -> tuple[float, ...]:
@@ -145,20 +188,40 @@ def _theta(values: Sequence[float], horizon: int) -> list[float]:
     ``deseasonalize=False``/``period=1`` because monthly personal-finance
     history is too short to identify yearly seasonality (see module docstring).
     """
+    import numpy as np
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning
     from statsmodels.tsa.forecasting.theta import ThetaModel
 
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        fitted = ThetaModel(list(values), period=1, deseasonalize=False).fit()
+        # Only convergence noise — a blanket ignore would also hide overflow
+        # and invalid-value RuntimeWarnings, which are real signals here.
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        # statsmodels 0.14.6 assigns to ndarray.shape, which NumPy 2.5
+        # deprecates. Under a strict warning filter (this project runs pytest
+        # with filterwarnings=error) that raises, _safe_forecast swallows it,
+        # and Theta silently drops out of every selection — which is exactly
+        # how it went unnoticed the first time. Remove once statsmodels stops
+        # doing this; the forecast itself is unaffected.
+        warnings.filterwarnings("ignore", "Setting the shape on a NumPy array", DeprecationWarning)
+        # np.asarray, not list(): ThetaModel indexes `.shape` internally, so a
+        # plain list raises AttributeError.
+        fitted = ThetaModel(np.asarray(values, dtype=float), period=1, deseasonalize=False).fit()
         return [float(v) for v in fitted.forecast(horizon)]
 
 
 def _ets(values: Sequence[float], horizon: int) -> list[float]:
     """Additive-error, additive-trend exponential smoothing (no seasonality)."""
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning
     from statsmodels.tsa.exponential_smoothing.ets import ETSModel
 
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        # A perfectly-fitting series gives ETS a zero residual variance, and it
+        # divides by that when standardizing errors. Harmless for the point
+        # forecast we take, and that degenerate case is exactly what
+        # _INTERVAL_FLOOR_FRACTION exists to keep from being published as
+        # certainty. Still narrower than a blanket ignore.
+        warnings.filterwarnings("ignore", "invalid value encountered", RuntimeWarning)
         fitted = ETSModel(list(values), error="add", trend="add", seasonal=None).fit(disp=False)
         return [float(v) for v in fitted.forecast(horizon)]
 
@@ -213,9 +276,7 @@ def _mean_absolute_naive_error(values: Sequence[float]) -> float:
     return sum(diffs) / len(diffs)
 
 
-def _rolling_origin_errors(
-    fn: Callable[..., list[float]], values: Sequence[float], horizon: int
-) -> list[float]:
+def _rolling_origin_errors(fn: Callable[..., list[float]], values: Sequence[float]) -> list[float]:
     """Absolute one-step-ahead errors from a rolling-origin backtest.
 
     Walks the origin forward one month at a time, refitting on everything
@@ -263,7 +324,7 @@ def fit_variable(
         point = _safe_forecast(candidate.fn, values, horizon)
         if point is None:
             continue
-        errors = _rolling_origin_errors(candidate.fn, values, horizon)
+        errors = _rolling_origin_errors(candidate.fn, values)
         if not errors:
             continue
         mae = sum(errors) / len(errors)
@@ -276,12 +337,12 @@ def fit_variable(
         return VariableFit("mean", (mean,) * horizon, (0.0,) * horizon, None)
 
     mase, name, point, errors = best
-    half_width = _conformal_half_widths(errors, horizon, interval_level)
+    half_width = _conformal_half_widths(errors, horizon, interval_level, floor=scale)
     return VariableFit(name, tuple(point), half_width, mase if scale > 0 else None)
 
 
 def _conformal_half_widths(
-    errors: Sequence[float], horizon: int, interval_level: int
+    errors: Sequence[float], horizon: int, interval_level: int, floor: float = 0.0
 ) -> tuple[float, ...]:
     """Empirical error quantile per horizon step.
 
@@ -295,8 +356,11 @@ def _conformal_half_widths(
     ordered = sorted(errors)
     # Nearest-rank quantile: with few folds this is more stable than
     # interpolating between order statistics.
-    index = min(len(ordered) - 1, round((interval_level / 100) * len(ordered)) - 1)
-    base = ordered[max(0, index)]
+    # ceil, not round: nearest-rank needs the smallest index covering the
+    # requested fraction. round() picks the median for an 80% level at 3 folds,
+    # shipping a band labelled 80% that covers far less.
+    index = min(len(ordered) - 1, math.ceil((interval_level / 100) * len(ordered)) - 1)
+    base = max(ordered[max(0, index)], _INTERVAL_FLOOR_FRACTION * floor)
     return tuple(base * (step**0.5) for step in range(1, horizon + 1))
 
 
@@ -362,18 +426,32 @@ def forecast_series(
         return []
 
     fit = fit_variable(history.variable, horizon, interval_level)
-    committed = _project_committed(history.committed, horizon)
+    committed = _project_committed(history.recurring, trained_through, horizon)
     trend = trend_direction(history.totals)
 
     forecasts: list[Forecast] = []
     for step in range(1, horizon + 1):
-        variable = fit.point[step - 1]
         half_width = fit.half_width[step - 1]
-        committed_step = committed[step - 1]
-        predicted = committed_step + variable
+        # Every series here is a non-negative magnitude (spend and income are
+        # both stored positive), so clamp the modelled component at zero. Theta
+        # and ETS extrapolate a trend without bound, and a winding-down
+        # category drives them straight past zero into negative "spend" — which
+        # is not a smaller forecast, it is a meaningless one. Clamping the
+        # component rather than only the bound also keeps lower <= predicted <=
+        # upper true, which a bound-only clamp breaks.
+        variable = max(0.0, fit.point[step - 1])
+        committed_step = max(0.0, committed[step - 1])
+        # Quantize the parts, then SUM THE QUANTIZED PARTS. Quantizing the
+        # float sum instead lets both halves round up while their total rounds
+        # down (0.125 + 0.125 -> 0.26 vs 0.25), breaking the
+        # predicted == committed + variable invariant by a cent — which
+        # assert_forecast_components_sum compares exactly.
+        committed_amount = _quantize(committed_step)
+        variable_amount = _quantize(variable)
+        predicted_amount = committed_amount + variable_amount
+        predicted = float(predicted_amount)
         # The interval covers the variable component only — committed spend is
-        # known, so it shifts the band without widening it. Clamped at zero:
-        # a spend forecast below zero is not a meaningful lower bound.
+        # known, so it shifts the band without widening it.
         forecasts.append(
             Forecast(
                 series_kind=history.kind,
@@ -382,9 +460,9 @@ def forecast_series(
                 category_id=history.category_id,
                 period_start=_add_months(trained_through, step),
                 horizon=step,
-                committed_amount=_quantize(committed_step),
-                variable_amount=_quantize(variable),
-                predicted_amount=_quantize(predicted),
+                committed_amount=committed_amount,
+                variable_amount=variable_amount,
+                predicted_amount=predicted_amount,
                 lower_bound=_quantize(max(0.0, predicted - half_width)),
                 upper_bound=_quantize(predicted + half_width),
                 interval_level=interval_level,
@@ -397,18 +475,67 @@ def forecast_series(
     return forecasts
 
 
-def _project_committed(committed: Sequence[float], horizon: int) -> list[float]:
-    """Carry the committed component forward.
+_CADENCE_MONTHS = {"monthly": 1, "quarterly": 3, "yearly": 12}
+"""Calendar-month step per cadence. Stepping by avg_gap_days instead drifts:
+30.4-day hops from a June charge put two "monthly" charges in July and none in
+some later month."""
 
-    Recurring charges recur, so the most recent month's committed total is the
-    best estimate of the next one's. The median of the last three months is
-    used rather than the last value alone, so a single missed or double-posted
-    subscription charge doesn't propagate into every future month.
+
+def _next_charge(charge_on: date, cadence: str, avg_gap_days: float) -> date:
+    """The next charge date after ``charge_on`` for this cadence."""
+    months = _CADENCE_MONTHS.get(cadence)
+    if months is None:  # weekly, or an unrecognized label — fall back to the gap
+        return charge_on + timedelta(days=max(1.0, avg_gap_days))
+    year_delta, month_index = divmod(charge_on.month - 1 + months, 12)
+    year, month = charge_on.year + year_delta, month_index + 1
+    # Clamp for short months: a charge on the 31st recurs on the 30th in June.
+    return date(year, month, min(charge_on.day, calendar.monthrange(year, month)[1]))
+
+
+def _project_committed(
+    groups: Sequence[RecurringGroup], trained_through: date, horizon: int
+) -> list[float]:
+    """Project each recurring charge forward on its own observed cadence.
+
+    Walks each group's charge dates forward from ``last_seen_on`` in steps of
+    its ``avg_gap_days`` and bins them into the horizon's months, so a monthly
+    subscription contributes to every month, a quarterly premium to one month
+    in three, and an annual one to at most a single month.
+
+    Collapsing the committed history to a monthly average instead (e.g. the
+    median of recent months) is wrong in both directions, and silently: an
+    annual premium is removed from the variable series but averages to ~0, so
+    the money simply disappears from the forecast; a quarterly charge that
+    happens to fall inside the averaging window gets projected into every
+    month, overstating it threefold.
+
+    Groups that have not charged in roughly two cycles are treated as lapsed
+    and dropped — a cancelled subscription should stop being committed spend.
     """
-    if not committed:
-        return [0.0] * horizon
-    window = committed[-3:]
-    return [statistics.median(window)] * horizon
+    totals = [0.0] * horizon
+    month_index = {
+        (month.year, month.month): step - 1
+        for step in range(1, horizon + 1)
+        for month in (_add_months(trained_through, step),)
+    }
+    as_of = _add_months(trained_through, 1)  # first day of the first forecast month
+    horizon_end = _add_months(trained_through, horizon + 1)  # exclusive
+
+    for group in groups:
+        gap = max(1.0, group.avg_gap_days)
+        if (as_of - group.last_seen_on).days > 2 * gap:
+            continue  # lapsed: no charge for ~two cycles
+        charge_on = group.last_seen_on
+        # Bounded: every step advances at least a day and horizon is at most
+        # MAX_HORIZON months, so this runs a few hundred times at worst.
+        while True:
+            charge_on = _next_charge(charge_on, group.cadence, gap)
+            if charge_on >= horizon_end:
+                break
+            step_index = month_index.get((charge_on.year, charge_on.month))
+            if step_index is not None:
+                totals[step_index] += group.amount
+    return totals
 
 
 # ── Warehouse I/O ───────────────────────────────────────────────
@@ -492,6 +619,37 @@ _LEDGER_START_SQL = """
 SELECT date_trunc('month', min(posted_on))::DATE FROM main_silver.silver_transactions
 """
 
+# Each detected recurring group, with the category it most often lands in so a
+# budget can claim the ones inside its subtree. A group with no categorized
+# line item still appears (category_id NULL) and counts toward total spend.
+_RECURRING_GROUPS_SQL = """
+SELECT
+    r.merchant_name,
+    r.amount,
+    r.cadence,
+    r.avg_gap_days,
+    r.last_seen_on,
+    (
+        SELECT li.category_id
+        FROM main_silver.silver_transactions AS t
+        INNER JOIN main_gold.gold_line_items AS li USING (transaction_id)
+        WHERE t.merchant_name = r.merchant_name
+          AND -t.amount = r.amount
+          AND li.category_id IS NOT NULL
+        GROUP BY li.category_id
+        ORDER BY count(*) DESC, li.category_id
+        LIMIT 1
+    ) AS category_id
+FROM main_gold.gold_recurring_expenses AS r
+"""
+
+# Which categories fall inside each budget's subtree.
+_BUDGET_SUBTREE_SQL = """
+SELECT b.id AS budget_id, anc.category_id
+FROM budgets AS b
+INNER JOIN main_gold.gold_category_ancestors AS anc ON anc.ancestor_id = b.category_id
+"""
+
 
 @dataclass
 class _BudgetAccumulator:
@@ -526,6 +684,23 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
         return []  # every transaction is in the current (incomplete) month or later
     params = {"start": start, "end": trained_through}
 
+    groups = tuple(
+        RecurringGroup(
+            merchant_name=name,
+            amount=float(amount),
+            cadence=cadence,
+            avg_gap_days=float(avg_gap_days),
+            last_seen_on=last_seen_on,
+            category_id=category_id,
+        )
+        for name, amount, cadence, avg_gap_days, last_seen_on, category_id in conn.execute(
+            _RECURRING_GROUPS_SQL
+        ).fetchall()
+    )
+    subtree: dict[str, set[str]] = {}
+    for budget_id, category_id in conn.execute(_BUDGET_SUBTREE_SQL).fetchall():
+        subtree.setdefault(budget_id, set()).add(category_id)
+
     rows = conn.execute(_TOTALS_SQL, params).fetchall()
     months = tuple(row[0] for row in rows)
     series = [
@@ -537,6 +712,9 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             months=months,
             committed=tuple(float(row[1]) for row in rows),
             variable=tuple(float(row[2]) for row in rows),
+            # gold_recurring_expenses only detects outflows, so income has no
+            # committed component to project — it is modelled in full.
+            recurring=(),
         ),
         SeriesHistory(
             kind=ForecastSeriesKind.TOTAL_OUTFLOW,
@@ -546,6 +724,7 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             months=months,
             committed=tuple(float(row[3]) for row in rows),
             variable=tuple(float(row[4]) for row in rows),
+            recurring=groups,
         ),
     ]
 
@@ -569,13 +748,14 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             months=tuple(entry.months),
             committed=tuple(entry.committed),
             variable=tuple(entry.variable),
+            recurring=tuple(g for g in groups if g.category_id in subtree.get(budget_id, set())),
         )
         for budget_id, entry in by_budget.items()
     )
     return series
 
 
-_UPSERT_FORECAST = """
+_INSERT_FORECAST = """
 INSERT INTO forecasts (
     id, created_at, series_kind, series_key, series_label, category_id, period_start,
     horizon, committed_amount, variable_amount, predicted_amount, lower_bound, upper_bound,
@@ -608,10 +788,28 @@ def compute_forecasts(
     for history in load_series(conn, trained_through):
         rows.extend(forecast_series(history, trained_through, horizon, interval_level))
 
-    conn.execute("DELETE FROM forecasts")
-    for forecast in rows:
-        payload = forecast.model_dump()
-        payload["series_kind"] = forecast.series_kind.value
-        payload["trend"] = forecast.trend.value
-        conn.execute(_UPSERT_FORECAST, payload)
+    if not rows:
+        # Leave the previous run's forecasts alone. Wiping them because this
+        # run produced nothing turns a transient upstream problem (an empty
+        # warehouse, a half-finished transform) into lost output, and the
+        # caller cannot tell that from a legitimate cold start.
+        logger.warning("no series produced a forecast; leaving existing forecasts untouched")
+        return 0
+
+    # One transaction: DuckDB autocommits each execute, so a failure partway
+    # through would otherwise leave gold_forecasts publishing (say) an income
+    # projection with no matching spend projection — a cash-flow view that is
+    # wrong rather than merely absent.
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute("DELETE FROM forecasts")
+        for forecast in rows:
+            payload = forecast.model_dump()
+            payload["series_kind"] = forecast.series_kind.value
+            payload["trend"] = forecast.trend.value
+            conn.execute(_INSERT_FORECAST, payload)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
     return len(rows)

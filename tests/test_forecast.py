@@ -12,8 +12,10 @@ from decimal import Decimal
 import pytest
 
 from personal_finance.forecast import (
+    _MODELS,
     DEFAULT_INTERVAL_LEVEL,
     MIN_HISTORY_MONTHS,
+    RecurringGroup,
     SeriesHistory,
     _add_months,
     _candidate_models,
@@ -21,6 +23,7 @@ from personal_finance.forecast import (
     _last_complete_month,
     _mean_absolute_naive_error,
     _project_committed,
+    _rolling_origin_errors,
     _safe_forecast,
     fit_variable,
     forecast_series,
@@ -29,20 +32,27 @@ from personal_finance.forecast import (
 from personal_finance.models import ForecastSeriesKind, TrendDirection
 
 
+def _monthly(amount: float, last_seen_on: date = date(2026, 6, 1)) -> RecurringGroup:
+    return RecurringGroup("RENT", amount, "monthly", 30.4, last_seen_on, None)
+
+
 def _history(
     committed: list[float],
     variable: list[float],
     kind: ForecastSeriesKind = ForecastSeriesKind.TOTAL_OUTFLOW,
+    recurring: tuple[RecurringGroup, ...] = (),
 ) -> SeriesHistory:
     months = tuple(_add_months(date(2026, 1, 1), i) for i in range(len(variable)))
+    is_budget = kind is ForecastSeriesKind.BUDGET_CATEGORY
     return SeriesHistory(
         kind=kind,
-        key="total_outflow",
+        key="budget-1" if is_budget else kind.value,
         label="Total spend",
-        category_id=None,
+        category_id="cat-1" if is_budget else None,
         months=months,
         committed=tuple(committed),
         variable=tuple(variable),
+        recurring=recurring,
     )
 
 
@@ -195,21 +205,6 @@ class TestTrendDirection:
         assert trend_direction(climb) == TrendDirection.RISING
 
 
-class TestProjectCommitted:
-    def test_carries_the_recurring_total_forward(self) -> None:
-        assert _project_committed([1800.0, 1800.0, 1800.0], 3) == [1800.0] * 3
-
-    def test_median_absorbs_a_double_posted_charge(self) -> None:
-        """A single double-post must not propagate into every future month."""
-        assert _project_committed([1800.0, 3600.0, 1800.0], 2) == [1800.0] * 2
-
-    def test_median_absorbs_a_missed_charge(self) -> None:
-        assert _project_committed([1800.0, 0.0, 1800.0], 2) == [1800.0] * 2
-
-    def test_empty_history_projects_zero(self) -> None:
-        assert _project_committed([], 3) == [0.0, 0.0, 0.0]
-
-
 class TestForecastSeries:
     def test_refuses_to_forecast_below_the_history_floor(self) -> None:
         short = _history([0.0] * 3, [100.0, 110.0, 105.0])
@@ -264,10 +259,114 @@ class TestForecastSeries:
         history = _history([100.0] * 8, [50.0] * 8, kind=ForecastSeriesKind.BUDGET_CATEGORY)
         rows = forecast_series(history, date(2026, 6, 1), horizon=2)
         assert all(r.series_kind == ForecastSeriesKind.BUDGET_CATEGORY for r in rows)
-        assert all(r.series_key == "total_outflow" for r in rows)
+        assert all(r.series_key == "budget-1" for r in rows)
         assert all(r.trained_through == date(2026, 6, 1) for r in rows)
         assert all(r.interval_level == DEFAULT_INTERVAL_LEVEL for r in rows)
 
     def test_history_floor_is_the_documented_constant(self) -> None:
         exactly_enough = _history([0.0] * MIN_HISTORY_MONTHS, [100.0] * MIN_HISTORY_MONTHS)
         assert forecast_series(exactly_enough, date(2026, 6, 1), horizon=1)
+
+
+class TestEveryCandidateActuallyFits:
+    """The bug this class exists for: `_theta` was passed a plain list, which
+    statsmodels rejects, so `_safe_forecast` swallowed an AttributeError and
+    Theta was silently disqualified for every series ever forecast. Asserting
+    that a model is *listed* is not the same as asserting it *runs*."""
+
+    @pytest.mark.parametrize("candidate", _MODELS, ids=lambda c: c.name)
+    def test_candidate_produces_a_finite_forecast(self, candidate) -> None:
+        values = [100.0, 120.0, 90.0, 140.0, 110.0, 130.0, 105.0, 125.0, 95.0, 135.0]
+        result = _safe_forecast(candidate.fn, values, 3)
+        assert result is not None, f"{candidate.name} failed to fit a well-behaved series"
+        assert len(result) == 3
+
+    @pytest.mark.parametrize("candidate", _MODELS, ids=lambda c: c.name)
+    def test_candidate_backtests(self, candidate) -> None:
+        """A model that cannot backtest is silently unselectable."""
+        values = [100.0, 120.0, 90.0, 140.0, 110.0, 130.0, 105.0, 125.0, 95.0, 135.0]
+        assert _rolling_origin_errors(candidate.fn, values), f"{candidate.name} produced no folds"
+
+    def test_selection_reports_a_real_model_name(self) -> None:
+        fit = fit_variable([100.0, 120.0, 90.0, 140.0, 110.0, 130.0, 105.0, 125.0], horizon=3)
+        assert fit.model_name in {m.name for m in _MODELS}
+
+
+class TestProjectCommittedCadence:
+    """Recurring charges must be projected on their own cadence. Collapsing the
+    committed history to a monthly average loses annual charges entirely and
+    triples quarterly ones."""
+
+    def test_monthly_charge_lands_in_every_month(self) -> None:
+        groups = (RecurringGroup("RENT", 1800.0, "monthly", 30.4, date(2026, 6, 1), None),)
+        assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([1800.0] * 3)
+
+    def test_annual_charge_does_not_vanish(self) -> None:
+        """It is removed from the variable series, so if it also projects as
+        zero the money simply disappears from the forecast."""
+        groups = (RecurringGroup("INSURANCE", 600.0, "yearly", 365.0, date(2026, 6, 15), None),)
+        # next charge is ~2027-06-15, outside a 3-month horizon
+        assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([0.0] * 3)
+        # ...but inside a horizon that reaches it, it appears exactly once
+        twelve = _project_committed(groups, date(2027, 4, 1), 3)
+        assert sum(twelve) == pytest.approx(600.0)
+        assert sorted(twelve)[-1] == pytest.approx(600.0)
+
+    def test_quarterly_charge_is_not_smeared_across_every_month(self) -> None:
+        groups = (RecurringGroup("WATER", 300.0, "quarterly", 91.0, date(2026, 6, 10), None),)
+        projected = _project_committed(groups, date(2026, 6, 1), 3)
+        assert sum(projected) == pytest.approx(300.0)  # exactly one charge, not three
+
+    def test_lapsed_subscription_stops_being_committed(self) -> None:
+        """Cancelled six months ago; it should not be projected forward."""
+        groups = (RecurringGroup("OLD GYM", 40.0, "monthly", 30.4, date(2025, 12, 1), None),)
+        assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([0.0] * 3)
+
+    def test_no_groups_projects_zero(self) -> None:
+        assert _project_committed((), date(2026, 6, 1), 3) == [0.0, 0.0, 0.0]
+
+
+class TestIntervalFloor:
+    def test_near_perfect_fit_still_expresses_uncertainty(self) -> None:
+        """A perfectly linear history drives backtest residuals to ~0. Without
+        a floor this publishes a multi-month extrapolation as a zero-width 80%
+        interval — maximal confidence exactly where it is least earned."""
+        fit = fit_variable([300.0 + 20 * i for i in range(12)], horizon=6)
+        assert all(hw > 0 for hw in fit.half_width)
+        assert fit.half_width[0] < fit.half_width[5]
+
+
+class TestSeriesHistoryInvariant:
+    def test_mismatched_parallel_arrays_are_rejected_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="equal length"):
+            SeriesHistory(
+                kind=ForecastSeriesKind.TOTAL_OUTFLOW,
+                key="k",
+                label="l",
+                category_id=None,
+                months=(date(2026, 1, 1), date(2026, 2, 1)),
+                committed=(1.0,),
+                variable=(1.0, 2.0),
+            )
+
+
+class TestForecastRowInvariants:
+    def test_components_sum_exactly_after_quantization(self) -> None:
+        """Quantizing the float sum instead of summing the quantized parts lets
+        both halves round up while the total rounds down, breaking the
+        invariant the dbt test compares exactly."""
+        history = _history(
+            [0.0] * 8,
+            [1.005] * 8,
+            recurring=(RecurringGroup("X", 1.005, "monthly", 30.4, date(2026, 6, 1), None),),
+        )
+        for row in forecast_series(history, date(2026, 6, 1), horizon=3):
+            assert row.predicted_amount == row.committed_amount + row.variable_amount
+
+    def test_declining_series_never_yields_a_negative_forecast(self) -> None:
+        """Theta/ETS extrapolate a trend without bound; negative spend is not a
+        smaller forecast, it is a meaningless one — and it inverted the bounds."""
+        declining = [900.0, 750.0, 600.0, 450.0, 300.0, 150.0, 50.0, 10.0]
+        for row in forecast_series(_history([0.0] * 8, declining), date(2026, 6, 1), horizon=6):
+            assert row.predicted_amount >= Decimal("0.00")
+            assert row.lower_bound <= row.predicted_amount <= row.upper_bound

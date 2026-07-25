@@ -16,7 +16,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _new_id() -> str:
@@ -345,6 +345,40 @@ class Forecast(Entity):
     upper_bound: Decimal
     interval_level: int = Field(ge=1, le=99)
     model_name: str
-    mase: float | None = None  # backtest error vs. naive; < 1 beats naive
+    # Backtest error vs. naive; < 1 beats naive. None means there was no
+    # meaningful scale to divide by (a perfectly flat series has zero naive
+    # error), or that every candidate failed to fit and `model_name` fell back
+    # to "mean" — the two cases are distinguishable by `model_name`.
+    mase: float | None = None
     trend: TrendDirection
     trained_through: date  # last COMPLETE month used to fit
+
+    @model_validator(mode="after")
+    def _check_invariants(self) -> Forecast:
+        """Enforce what the docstring, the mart and the dbt test all assume.
+
+        These held only by construction before, so a rounding slip in
+        `personal_finance.forecast` surfaced as a failed dbt build after the
+        rows were already written. Checking here fails at the row that is
+        wrong, which is where the bug actually is.
+        """
+        if self.predicted_amount != self.committed_amount + self.variable_amount:
+            message = (
+                f"predicted_amount {self.predicted_amount} != committed "
+                f"{self.committed_amount} + variable {self.variable_amount}"
+            )
+            raise ValueError(message)
+        if not (self.lower_bound <= self.predicted_amount <= self.upper_bound):
+            message = (
+                f"interval [{self.lower_bound}, {self.upper_bound}] does not "
+                f"bracket predicted_amount {self.predicted_amount}"
+            )
+            raise ValueError(message)
+        is_total = self.series_kind is not ForecastSeriesKind.BUDGET_CATEGORY
+        if is_total and self.series_key != self.series_kind.value:
+            message = f"{self.series_kind} must use its own name as series_key"
+            raise ValueError(message)
+        if not is_total and self.category_id is None:
+            message = "a budget_category forecast must carry a category_id"
+            raise ValueError(message)
+        return self
