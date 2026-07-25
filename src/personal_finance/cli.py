@@ -11,9 +11,10 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf ingest      load source export files into the bronze layer
     pf watch       watch a folder and ingest exports as they are dropped in
     pf deposit     atomically place a completed file into a watched folder
-    pf enrich      embed merchants for the embedding-similarity categorization stage
-    pf classify    ask a local LLM to categorize merchants stages 1-2 missed
-    pf review      list the categorization cascade's ambiguous tail and record corrections
+    pf enrich      embed merchants/split products for the embedding-similarity categorization stage
+    pf classify    ask a local LLM to categorize merchants/split products stages 1-2 missed
+    pf review      list the categorization cascade's ambiguous tail (--kind transaction|split)
+                   and record corrections
 """
 
 import json
@@ -26,7 +27,11 @@ import typer
 
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
-from personal_finance.embed import EmbeddingClient, compute_missing_embeddings
+from personal_finance.embed import (
+    EmbeddingClient,
+    compute_missing_embeddings,
+    compute_missing_product_embeddings,
+)
 from personal_finance.exceptions import (
     ConfigurationError,
     ExternalServiceError,
@@ -43,6 +48,7 @@ from personal_finance.ingest import (
 from personal_finance.llm_categorize import (
     LlmCategorizeClient,
     compute_missing_llm_categories,
+    compute_missing_product_llm_categories,
     fetch_category_paths,
 )
 from personal_finance.merchant_merge import (
@@ -50,8 +56,8 @@ from personal_finance.merchant_merge import (
     fetch_similarity,
     record_merge_decision,
 )
-from personal_finance.models import MergeStatus
-from personal_finance.review import fetch_review_queue, record_label
+from personal_finance.models import EntityKind, MergeStatus
+from personal_finance.review import fetch_review_queue, fetch_split_review_queue, record_label
 from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
 
 if TYPE_CHECKING:
@@ -344,13 +350,14 @@ def enrich(
         None, help="Embedding model (default: Settings.ollama.embedding_model)."
     ),
 ) -> None:
-    """Embed every distinct merchant not yet cached, for the embedding-similarity
-    categorization stage.
+    """Embed every distinct merchant and split product not yet cached, for the
+    embedding-similarity categorization stage (transactions and line items).
 
     Requires `pf transform` to have run at least once (reads
-    silver_transactions.merchant_name) and a local Ollama server with the
-    embedding model pulled. Re-run `pf transform` afterward to build
-    silver_transaction_categories_embedding against the newly cached vectors.
+    silver_transactions.merchant_name / silver_amazon_splits.product_name) and
+    a local Ollama server with the embedding model pulled. Re-run
+    `pf transform` afterward to build silver_transaction_categories_embedding /
+    silver_split_categories_embedding against the newly cached vectors.
     """
     settings = get_settings()
     warehouse = settings.data.warehouse_path
@@ -365,14 +372,20 @@ def enrich(
             base_url or settings.ollama.base_url, model or settings.ollama.embedding_model
         ) as client:
             try:
-                count = compute_missing_embeddings(
+                merchant_count = compute_missing_embeddings(
+                    conn, client, model or settings.ollama.embedding_model
+                )
+                product_count = compute_missing_product_embeddings(
                     conn, client, model or settings.ollama.embedding_model
                 )
             except ExternalServiceError as exc:
                 typer.echo(f"Embedding failed: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
 
-    typer.echo(f"Embedded {count} new merchant(s). Run `pf transform` to apply them.")
+    typer.echo(
+        f"Embedded {merchant_count} new merchant(s), {product_count} new product(s). "
+        "Run `pf transform` to apply them."
+    )
 
 
 @app.command()
@@ -384,14 +397,16 @@ def classify(
         None, help="Chat model (default: Settings.ollama.chat_model)."
     ),
 ) -> None:
-    """Ask a local LLM to categorize merchants stages 1-2 (rules, embedding
-    similarity) missed — stage 3 of the categorization cascade.
+    """Ask a local LLM to categorize merchants and split products stages 1-2
+    (rules, embedding similarity) missed — stage 3 of the categorization
+    cascade, for both transactions and line items.
 
     Requires `pf transform` to have run at least once (reads
-    silver_transaction_categories/_embedding to see what's still
-    uncategorized) and a local Ollama server with the chat model pulled.
-    Re-run `pf transform` afterward to build silver_transaction_categories_llm
-    against the newly cached classifications.
+    silver_transaction_categories/_embedding and
+    silver_split_categories/_embedding to see what's still uncategorized) and
+    a local Ollama server with the chat model pulled. Re-run `pf transform`
+    afterward to build silver_transaction_categories_llm /
+    silver_split_categories_llm against the newly cached classifications.
     """
     settings = get_settings()
     warehouse = settings.data.warehouse_path
@@ -406,14 +421,20 @@ def classify(
             base_url or settings.ollama.base_url, model or settings.ollama.chat_model
         ) as client:
             try:
-                count = compute_missing_llm_categories(
+                merchant_count = compute_missing_llm_categories(
+                    conn, client, model or settings.ollama.chat_model
+                )
+                product_count = compute_missing_product_llm_categories(
                     conn, client, model or settings.ollama.chat_model
                 )
             except ExternalServiceError as exc:
                 typer.echo(f"Classification failed: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
 
-    typer.echo(f"Classified {count} new merchant(s). Run `pf transform` to apply them.")
+    typer.echo(
+        f"Classified {merchant_count} new merchant(s), {product_count} new product(s). "
+        "Run `pf transform` to apply them."
+    )
 
 
 def _require_silver_transactions_built(conn: duckdb.DuckDBPyConnection) -> None:
@@ -429,34 +450,59 @@ def _require_silver_transactions_built(conn: duckdb.DuckDBPyConnection) -> None:
         raise typer.Exit(code=1)
 
 
-def _require_transform_built(conn: duckdb.DuckDBPyConnection) -> None:
+_REVIEW_ALL_TABLES: dict[str, str] = {
+    "transaction": "silver_transaction_categories_all",
+    "split": "silver_split_categories_all",
+}
+
+
+def _require_transform_built(conn: duckdb.DuckDBPyConnection, kind: str = "transaction") -> None:
+    table = _REVIEW_ALL_TABLES[kind]
     result = conn.execute(
         "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_schema = 'main_silver' AND table_name = 'silver_transaction_categories_all'"
+        "WHERE table_schema = 'main_silver' AND table_name = $table",
+        {"table": table},
     ).fetchone()
     if not result or not result[0]:
-        typer.echo(
-            "silver_transaction_categories_all has not been built yet — run `pf transform` first.",
-            err=True,
-        )
+        typer.echo(f"{table} has not been built yet — run `pf transform` first.", err=True)
+        raise typer.Exit(code=1)
+
+
+def _validate_kind(kind: str) -> None:
+    if kind not in _REVIEW_ALL_TABLES:
+        typer.echo(f"--kind must be one of {sorted(_REVIEW_ALL_TABLES)}, not {kind!r}.", err=True)
         raise typer.Exit(code=1)
 
 
 @review_app.command("list")
 def review_list(
-    limit: int = typer.Option(20, help="Max transactions to show."),
+    limit: int = typer.Option(20, help="Max transactions/splits to show."),
+    kind: str = typer.Option("transaction", help='"transaction" or "split".'),
 ) -> None:
-    """List transactions no cascade stage could confidently categorize.
+    """List transactions (or splits) no cascade stage could confidently categorize.
 
     Requires `pf transform` to have run at least once.
     """
+    _validate_kind(kind)
     warehouse = get_settings().data.warehouse_path
     if not warehouse.exists():
         typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
         raise typer.Exit(code=1)
 
     with duckdb.connect(str(warehouse)) as conn:
-        _require_transform_built(conn)
+        _require_transform_built(conn, kind)
+        if kind == "split":
+            split_items = fetch_split_review_queue(conn, limit=limit)
+            if not split_items:
+                typer.echo("Nothing to review — every split is categorized.")
+                return
+            for split_item in split_items:
+                typer.echo(
+                    f"{split_item.split_id}  {split_item.amount:>10}  "
+                    f"{split_item.product_name} (txn {split_item.transaction_id})"
+                )
+            typer.echo(f"{len(split_items)} split(s) awaiting review.")
+            return
         items = fetch_review_queue(conn, limit=limit)
 
     if not items:
@@ -472,32 +518,37 @@ def review_list(
 
 @review_app.command("label")
 def review_label(
-    transaction_id: str = typer.Argument(..., help="transaction_id from `pf review list`."),
+    subject_id: str = typer.Argument(..., help="transaction_id or split_id from `pf review list`."),
     category_path: str = typer.Argument(
         ..., help="Slash-separated category path, e.g. essentials/groceries."
     ),
     note: str | None = typer.Option(None, help="Optional free-text context for this correction."),
+    kind: str = typer.Option("transaction", help='"transaction" or "split".'),
 ) -> None:
-    """Record a human category correction for one transaction.
+    """Record a human category correction for one transaction or split.
 
     Stored as a label; the categorization outranks every automated stage once
     `pf transform` re-runs.
     """
+    _validate_kind(kind)
     warehouse = get_settings().data.warehouse_path
     if not warehouse.exists():
         typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
         raise typer.Exit(code=1)
 
     with duckdb.connect(str(warehouse)) as conn:
-        _require_transform_built(conn)
+        _require_transform_built(conn, kind)
         category_paths = fetch_category_paths(conn)
+        entity_kind = EntityKind.SPLIT if kind == "split" else EntityKind.TRANSACTION
         try:
-            record_label(conn, transaction_id, category_path, category_paths, note=note)
+            record_label(
+                conn, subject_id, category_path, category_paths, subject_kind=entity_kind, note=note
+            )
         except NotFoundError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
 
-    typer.echo(f"Labeled {transaction_id} -> {category_path}. Run `pf transform` to apply it.")
+    typer.echo(f"Labeled {subject_id} -> {category_path}. Run `pf transform` to apply it.")
 
 
 @review_app.command("merge-candidates")

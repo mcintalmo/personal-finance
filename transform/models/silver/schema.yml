@@ -352,12 +352,11 @@ models:
 
   - name: silver_split_categories
     description: >-
-      Line-item categorization — the rules-based cascade stage 1 also used for
-      transactions (silver_transaction_categories), applied to
-      silver_amazon_splits.product_name instead of merchant_name. A split
-      absent here is uncategorized by this stage; embedding/LLM/human-review
-      stages mirroring the transaction cascade are follow-up work, not built
-      yet.
+      Stage 1 (rules) of the split-categorization cascade — the same
+      rules-based approach used for transactions (silver_transaction_categories),
+      applied to silver_amazon_splits.product_name instead of merchant_name. A
+      split absent here is uncategorized by this stage; later cascade stages
+      pick up the remainder.
     columns:
       - name: split_id
         description: One row per matched split; absent = not matched by any product_name rule.
@@ -382,7 +381,128 @@ models:
           - not_null
           - accepted_values:
               arguments:
-                values: [rule]
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_split_categories_embedding
+    description: >-
+      Stage 2 (embedding similarity) of the split-categorization cascade —
+      one row per split whose product matched a rule-categorized product by
+      cosine similarity above the confidence threshold. Only covers splits
+      stage 1 missed entirely.
+    columns:
+      - name: split_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_amazon_splits')
+                field: split_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_split_categories_llm
+    description: >-
+      Stage 3 (local-LLM fallback) of the split-categorization cascade — one
+      row per split whose product a local Ollama chat model classified with
+      confidence above the threshold. Only covers products stages 1-2 missed
+      entirely.
+    columns:
+      - name: split_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_amazon_splits')
+                field: split_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_split_categories_human
+    description: >-
+      The human-review stage of the split-categorization cascade —
+      corrections recorded via `pf review label --kind split`. The
+      highest-priority stage: it can override an earlier stage's assignment,
+      not just fill a gap. A split corrected more than once keeps only its
+      latest label.
+    columns:
+      - name: split_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_amazon_splits')
+                field: split_id
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
+      - name: categorization_confidence
+        data_tests: [not_null]
+
+  - name: silver_split_categories_all
+    description: >-
+      Every split categorized so far, across every split-cascade stage
+      (human corrections, then rules + embedding similarity + local-LLM
+      fallback) — the split-level analog of silver_transaction_categories_all.
+      Absent = not yet categorized by any stage.
+    columns:
+      - name: split_id
+        description: One row per categorized split, across all stages.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_amazon_splits')
+                field: split_id
+      - name: category_id
+        data_tests: [not_null]
+      - name: categorization_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [rule, embedding, llm, human]
       - name: categorization_confidence
         data_tests: [not_null]
 

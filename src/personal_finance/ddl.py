@@ -133,6 +133,35 @@ TABLES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "product_embeddings",
+        """
+        CREATE TABLE IF NOT EXISTS product_embeddings (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            product_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            embedding DOUBLE[] NOT NULL,
+            note TEXT,
+            UNIQUE (product_name, model)
+        )
+        """,
+    ),
+    (
+        "product_llm_categories",
+        """
+        CREATE TABLE IF NOT EXISTS product_llm_categories (
+            id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL,
+            product_name TEXT NOT NULL,
+            model TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            confidence DOUBLE NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+            note TEXT,
+            UNIQUE (product_name, model)
+        )
+        """,
+    ),
+    (
         "transactions",
         """
         CREATE TABLE IF NOT EXISTS transactions (

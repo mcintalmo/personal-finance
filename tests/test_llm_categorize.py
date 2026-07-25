@@ -16,8 +16,10 @@ from personal_finance.exceptions import ExternalServiceError
 from personal_finance.llm_categorize import (
     LlmCategorizeClient,
     compute_missing_llm_categories,
+    compute_missing_product_llm_categories,
     fetch_category_paths,
     merchant_llm_category_id,
+    product_llm_category_id,
 )
 
 _PATHS = ["essentials/groceries", "non-essentials/dining"]
@@ -55,6 +57,36 @@ class TestClassify:
         assert "essentials/groceries" in prompt
         assert "non-essentials/dining" in prompt
         assert result == ("essentials/groceries", 0.75)
+
+    def test_default_prompt_wording_is_unchanged_by_subject_kind_generalization(self):
+        # Regression guard: generalizing classify() to accept subject_kind
+        # must not change the merchant path's prompt text as a side effect.
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=_chat_response("essentials/groceries", 0.75))
+
+        with client_with_handler(handler) as client:
+            client.classify("KROGER", _PATHS)
+
+        prompt = captured["body"]["messages"][0]["content"]
+        assert "Merchant: KROGER" in prompt
+        assert "Bank transaction merchant: KROGER" not in prompt
+
+    def test_product_subject_kind_changes_prompt_wording(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=_chat_response("essentials/groceries", 0.75))
+
+        with client_with_handler(handler) as client:
+            client.classify("Bounty Paper Towels", _PATHS, subject_kind="product line item")
+
+        prompt = captured["body"]["messages"][0]["content"]
+        assert "Product: Bounty Paper Towels" in prompt
+        assert "product line item" in prompt
 
     def test_confidence_is_clamped_to_zero_one(self):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -230,6 +262,71 @@ class TestComputeMissingLlmCategories:
             compute_missing_llm_categories(conn, client, "m")
         (id_,) = conn.execute("SELECT id FROM merchant_llm_categories").fetchone()
         assert id_ == merchant_llm_category_id("CHIPOTLE", "m")
+
+
+class TestComputeMissingProductLlmCategories:
+    @pytest.fixture
+    def conn(self):
+        with duckdb.connect(":memory:") as connection:
+            create_schema(connection)
+            connection.execute(
+                "INSERT INTO categories (id, created_at, name, parent_id) "
+                "VALUES ('essentials', now(), 'essentials', NULL), "
+                "('groceries', now(), 'groceries', 'essentials'), "
+                "('dining', now(), 'dining', NULL)"
+            )
+            connection.execute("CREATE SCHEMA main_silver")
+            connection.execute(
+                "CREATE TABLE main_silver.silver_amazon_splits (split_id TEXT, product_name TEXT)"
+            )
+            connection.execute("CREATE TABLE main_silver.silver_split_categories (split_id TEXT)")
+            connection.execute(
+                "CREATE TABLE main_silver.silver_split_categories_embedding (split_id TEXT)"
+            )
+            yield connection
+
+    def test_classifies_only_uncategorized_products(self, conn):
+        conn.executemany(
+            "INSERT INTO main_silver.silver_amazon_splits VALUES (?, ?)",
+            [("s1", "Apples"), ("s2", "Burrito Kit"), ("s3", "Batteries")],
+        )
+        conn.execute("INSERT INTO main_silver.silver_split_categories VALUES ('s3')")
+        client = _fake_client(
+            {"Burrito Kit": ("dining", 0.8), "Apples": ("essentials/groceries", 0.7)}
+        )
+        with client:
+            count = compute_missing_product_llm_categories(conn, client, "m")
+        assert count == 2  # Batteries excluded — already categorized by stage 1
+        rows = dict(
+            conn.execute("SELECT product_name, category_id FROM product_llm_categories").fetchall()
+        )
+        assert rows == {"Apples": "groceries", "Burrito Kit": "dining"}
+
+    def test_excludes_products_stage2_already_matched(self, conn):
+        conn.execute("INSERT INTO main_silver.silver_amazon_splits VALUES ('s1', 'Apples')")
+        conn.execute("INSERT INTO main_silver.silver_split_categories_embedding VALUES ('s1')")
+        client = _fake_client({})
+        with client:
+            count = compute_missing_product_llm_categories(conn, client, "m")
+        assert count == 0
+
+    def test_already_classified_products_are_skipped(self, conn):
+        conn.execute("INSERT INTO main_silver.silver_amazon_splits VALUES ('s1', 'Apples')")
+        client = _fake_client({"Apples": ("essentials/groceries", 0.8)})
+        with client:
+            first = compute_missing_product_llm_categories(conn, client, "m")
+            second = compute_missing_product_llm_categories(conn, client, "m")
+        assert first == 1
+        assert second == 0
+
+    def test_ids_are_deterministic_and_distinct_from_merchant_ids(self, conn):
+        conn.execute("INSERT INTO main_silver.silver_amazon_splits VALUES ('s1', 'Apples')")
+        client = _fake_client({"Apples": ("essentials/groceries", 0.8)})
+        with client:
+            compute_missing_product_llm_categories(conn, client, "m")
+        (id_,) = conn.execute("SELECT id FROM product_llm_categories").fetchone()
+        assert id_ == product_llm_category_id("Apples", "m")
+        assert id_ != merchant_llm_category_id("Apples", "m")
 
 
 class TestLiveOllama:

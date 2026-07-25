@@ -11,9 +11,9 @@
 -- since product_name is the only split-level field today.
 --
 -- Grain: at most one row per split_id — a split absent here is
--- uncategorized. Embedding-similarity / LLM-fallback / human-review stages
--- for splits (mirroring the transaction cascade's stages 2-4) are follow-up
--- work, not built yet — see TODO.md.
+-- uncategorized by this stage; embedding-similarity / LLM-fallback /
+-- human-review stages pick up the remainder — see
+-- silver_split_categories_embedding/_llm/_human and silver_split_categories_all.
 
 with splits as (
     select split_id, product_name

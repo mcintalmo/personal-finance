@@ -22,7 +22,7 @@ from uuid import NAMESPACE_URL, uuid5
 import httpx
 
 from personal_finance.exceptions import ExternalServiceError
-from personal_finance.models import MerchantLlmCategory
+from personal_finance.models import MerchantLlmCategory, ProductLlmCategory
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -43,12 +43,22 @@ _RESPONSE_FORMAT = {
 }
 
 
-def _build_prompt(merchant_name: str, category_paths: list[str]) -> str:
+# Short label for the prompt's "<Label>: <subject>" line — kept distinct from
+# the descriptive subject_kind phrase ("a bank transaction merchant") so the
+# original, unreviewed-verbose "Merchant: ALDI" wording (not "Bank transaction
+# merchant: ALDI") stays exactly what it was before subject_kind existed.
+_SUBJECT_LABELS = {
+    "bank transaction merchant": "Merchant",
+    "product line item": "Product",
+}
+
+
+def _build_prompt(subject_kind: str, subject: str, category_paths: list[str]) -> str:
+    label = _SUBJECT_LABELS.get(subject_kind, subject_kind.capitalize())
     options = "\n".join(f"- {path}" for path in category_paths)
     return (
-        "You are categorizing a bank transaction merchant into a personal "
-        "finance taxonomy.\n\n"
-        f"Merchant: {merchant_name}\n\n"
+        f"You are categorizing a {subject_kind} into a personal finance taxonomy.\n\n"
+        f"{label}: {subject}\n\n"
         "Choose exactly one category from this list (respond with the full "
         f"path, exactly as written):\n{options}\n\n"
         "Respond with a JSON object: `category` (one of the paths above, "
@@ -90,8 +100,18 @@ class LlmCategorizeClient:
     def close(self) -> None:
         self._client.close()
 
-    def classify(self, merchant_name: str, category_paths: list[str]) -> tuple[str, float] | None:
-        """Ask the model to pick a category path for one merchant.
+    def classify(
+        self,
+        subject: str,
+        category_paths: list[str],
+        *,
+        subject_kind: str = "bank transaction merchant",
+    ) -> tuple[str, float] | None:
+        """Ask the model to pick a category path for one merchant or product.
+
+        ``subject_kind`` only changes the prompt's wording (e.g. "product
+        line item" for the split-categorization cascade) — the request/
+        response shape is identical either way.
 
         Returns ``None`` — rather than raising — when the model's response
         can't be trusted (malformed JSON, or a category outside the given
@@ -111,7 +131,10 @@ class LlmCategorizeClient:
                 json={
                     "model": self._model,
                     "messages": [
-                        {"role": "user", "content": _build_prompt(merchant_name, category_paths)}
+                        {
+                            "role": "user",
+                            "content": _build_prompt(subject_kind, subject, category_paths),
+                        }
                     ],
                     "format": _RESPONSE_FORMAT,
                     "stream": False,
@@ -136,11 +159,11 @@ class LlmCategorizeClient:
             category = parsed["category"]
             confidence = float(parsed["confidence"])
         except TypeError, KeyError, ValueError, json.JSONDecodeError:
-            logger.warning("Ollama returned an unparseable classification for %r", merchant_name)
+            logger.warning("Ollama returned an unparseable classification for %r", subject)
             return None
         if category not in category_paths:
             logger.warning(
-                "Ollama chose category %r (not in the taxonomy) for %r", category, merchant_name
+                "Ollama chose category %r (not in the taxonomy) for %r", category, subject
             )
             return None
         return category, max(0.0, min(1.0, confidence))
@@ -250,5 +273,74 @@ def compute_missing_llm_categories(
             confidence=confidence,
         )
         conn.execute(_UPSERT_LLM_CATEGORY, llm_category.model_dump())
+        count += 1
+    return count
+
+
+def product_llm_category_id(product_name: str, model: str) -> str:
+    """Return the deterministic id for one (product_name, model) classification.
+
+    Same purpose as :func:`merchant_llm_category_id`, kept in its own
+    namespace/cache table (``product_llm_categories``).
+    """
+    return uuid5(NAMESPACE_URL, f"personal-finance:product_llm_category:{model}:{product_name}").hex
+
+
+_UPSERT_PRODUCT_LLM_CATEGORY = """
+INSERT INTO product_llm_categories (id, created_at, product_name, model, category_id, confidence, note)
+VALUES ($id, $created_at, $product_name, $model, $category_id, $confidence, $note)
+ON CONFLICT (id) DO UPDATE SET category_id = excluded.category_id, confidence = excluded.confidence
+"""
+
+
+def compute_missing_product_llm_categories(
+    conn: duckdb.DuckDBPyConnection,
+    client: LlmCategorizeClient,
+    model: str,
+) -> int:
+    """Classify every distinct split product_name stages 1-2 missed and not yet cached.
+
+    The split-categorization cascade's analog of :func:`compute_missing_llm_categories`.
+    Reads ``main_silver.silver_amazon_splits`` / ``silver_split_categories`` /
+    ``silver_split_categories_embedding``.
+
+    Returns:
+        How many products were newly cached (0 if all were already cached, or
+        the model couldn't confidently classify any of the remainder).
+    """
+    category_paths = fetch_category_paths(conn)
+    rows = conn.execute(
+        """
+        SELECT DISTINCT s.product_name
+        FROM main_silver.silver_amazon_splits AS s
+        WHERE s.product_name IS NOT NULL
+        AND s.split_id NOT IN (
+            SELECT split_id FROM main_silver.silver_split_categories
+        )
+        AND s.split_id NOT IN (
+            SELECT split_id FROM main_silver.silver_split_categories_embedding
+        )
+        AND s.product_name NOT IN (
+            SELECT product_name FROM product_llm_categories WHERE model = $model
+        )
+        ORDER BY s.product_name
+        """,
+        {"model": model},
+    ).fetchall()
+
+    count = 0
+    for (name,) in rows:
+        result = client.classify(name, list(category_paths), subject_kind="product line item")
+        if result is None:
+            continue
+        category_path, confidence = result
+        llm_category = ProductLlmCategory(
+            id=product_llm_category_id(name, model),
+            product_name=name,
+            model=model,
+            category_id=category_paths[category_path],
+            confidence=confidence,
+        )
+        conn.execute(_UPSERT_PRODUCT_LLM_CATEGORY, llm_category.model_dump())
         count += 1
     return count

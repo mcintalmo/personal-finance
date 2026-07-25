@@ -15,7 +15,9 @@ from personal_finance.ddl import create_schema
 from personal_finance.embed import (
     EmbeddingClient,
     compute_missing_embeddings,
+    compute_missing_product_embeddings,
     merchant_embedding_id,
+    product_embedding_id,
 )
 from personal_finance.exceptions import ExternalServiceError
 
@@ -177,6 +179,49 @@ class TestComputeMissingEmbeddings:
             compute_missing_embeddings(conn, client, "m")
         (id_,) = conn.execute("SELECT id FROM merchant_embeddings").fetchone()
         assert id_ == merchant_embedding_id("ALDI", "m")
+
+
+class TestComputeMissingProductEmbeddings:
+    @pytest.fixture
+    def conn(self):
+        with duckdb.connect(":memory:") as connection:
+            create_schema(connection)
+            connection.execute("CREATE SCHEMA main_silver")
+            connection.execute("CREATE TABLE main_silver.silver_amazon_splits (product_name TEXT)")
+            yield connection
+
+    def test_embeds_every_distinct_product(self, conn):
+        conn.executemany(
+            "INSERT INTO main_silver.silver_amazon_splits VALUES (?)",
+            [("Bounty Paper Towels",), ("Bounty Paper Towels",), ("Tide Detergent",)],
+        )
+        calls: list = []
+        with _fake_client(calls) as client:
+            count = compute_missing_product_embeddings(conn, client, "m")
+        assert count == 2
+        assert calls == [["Bounty Paper Towels", "Tide Detergent"]]
+        rows = dict(
+            conn.execute("SELECT product_name, embedding FROM product_embeddings").fetchall()
+        )
+        assert set(rows) == {"Bounty Paper Towels", "Tide Detergent"}
+
+    def test_already_embedded_products_are_skipped(self, conn):
+        conn.execute("INSERT INTO main_silver.silver_amazon_splits VALUES ('Bounty Paper Towels')")
+        calls: list = []
+        with _fake_client(calls) as client:
+            first = compute_missing_product_embeddings(conn, client, "m")
+            second = compute_missing_product_embeddings(conn, client, "m")
+        assert first == 1
+        assert second == 0
+        assert len(calls) == 1
+
+    def test_ids_are_deterministic_and_distinct_from_merchant_ids(self, conn):
+        conn.execute("INSERT INTO main_silver.silver_amazon_splits VALUES ('Bounty Paper Towels')")
+        with _fake_client([]) as client:
+            compute_missing_product_embeddings(conn, client, "m")
+        (id_,) = conn.execute("SELECT id FROM product_embeddings").fetchone()
+        assert id_ == product_embedding_id("Bounty Paper Towels", "m")
+        assert id_ != merchant_embedding_id("Bounty Paper Towels", "m")
 
 
 class TestLiveOllama:

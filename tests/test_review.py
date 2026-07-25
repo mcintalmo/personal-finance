@@ -9,7 +9,7 @@ import pytest
 from personal_finance.ddl import create_schema
 from personal_finance.exceptions import NotFoundError
 from personal_finance.models import EntityKind
-from personal_finance.review import fetch_review_queue, record_label
+from personal_finance.review import fetch_review_queue, fetch_split_review_queue, record_label
 
 _CATEGORY_PATHS = {"essentials/groceries": "groceries-id", "non-essentials/dining": "dining-id"}
 
@@ -34,6 +34,19 @@ def conn():
         connection.execute(
             "CREATE TABLE main_silver.silver_transaction_categories_all (transaction_id TEXT)"
         )
+        connection.execute(
+            """
+            CREATE TABLE main_silver.silver_amazon_splits (
+                split_id TEXT,
+                transaction_id TEXT,
+                asin TEXT,
+                product_name TEXT,
+                amount DECIMAL(18, 2),
+                quantity BIGINT
+            )
+            """
+        )
+        connection.execute("CREATE TABLE main_silver.silver_split_categories_all (split_id TEXT)")
         yield connection
 
 
@@ -41,6 +54,13 @@ def _insert_txn(conn, transaction_id, posted_on, amount, merchant_name, source="
     conn.execute(
         "INSERT INTO main_silver.silver_transactions VALUES (?, ?, ?, ?, ?, ?)",
         (transaction_id, posted_on, amount, merchant_name, merchant_name or "", source),
+    )
+
+
+def _insert_split(conn, split_id, transaction_id, product_name, amount, asin="B000000000"):
+    conn.execute(
+        "INSERT INTO main_silver.silver_amazon_splits VALUES (?, ?, ?, ?, ?, ?)",
+        (split_id, transaction_id, asin, product_name, amount, 1),
     )
 
 
@@ -76,6 +96,31 @@ class TestFetchReviewQueue:
         conn.execute("INSERT INTO main_silver.silver_transaction_categories_all VALUES ('t1')")
 
         assert fetch_review_queue(conn) == []
+
+
+class TestFetchSplitReviewQueue:
+    def test_returns_only_uncategorized_splits(self, conn):
+        _insert_split(conn, "s1", "t1", "Apples", Decimal("-3.99"))
+        _insert_split(conn, "s2", "t1", "Mystery Widget", Decimal("-5.00"))
+        conn.execute("INSERT INTO main_silver.silver_split_categories_all VALUES ('s1')")
+
+        items = fetch_split_review_queue(conn)
+
+        assert [item.split_id for item in items] == ["s2"]
+
+    def test_respects_limit(self, conn):
+        for i in range(5):
+            _insert_split(conn, f"s{i}", "t1", f"Product {i}", Decimal("-1.00"))
+
+        items = fetch_split_review_queue(conn, limit=2)
+
+        assert len(items) == 2
+
+    def test_empty_queue_when_everything_categorized(self, conn):
+        _insert_split(conn, "s1", "t1", "Apples", Decimal("-3.99"))
+        conn.execute("INSERT INTO main_silver.silver_split_categories_all VALUES ('s1')")
+
+        assert fetch_split_review_queue(conn) == []
 
 
 class TestRecordLabel:
@@ -120,3 +165,40 @@ class TestRecordLabel:
 
         (count,) = conn.execute("SELECT count(*) FROM labels WHERE subject_id = 't1'").fetchone()
         assert count == 2
+
+    def test_stores_a_label_for_a_split(self, conn):
+        _insert_split(conn, "s1", "t1", "Mystery Widget", Decimal("-5.00"))
+
+        label = record_label(
+            conn, "s1", "essentials/groceries", _CATEGORY_PATHS, subject_kind=EntityKind.SPLIT
+        )
+
+        assert label.subject_kind == EntityKind.SPLIT
+        assert label.subject_id == "s1"
+        row = conn.execute(
+            "SELECT subject_kind, subject_id, category_id FROM labels WHERE id = $id",
+            {"id": label.id},
+        ).fetchone()
+        assert row == ("split", "s1", "groceries-id")
+
+    def test_unknown_split_raises(self, conn):
+        with pytest.raises(NotFoundError, match="No such split"):
+            record_label(
+                conn,
+                "does-not-exist",
+                "essentials/groceries",
+                _CATEGORY_PATHS,
+                subject_kind=EntityKind.SPLIT,
+            )
+
+    def test_unsupported_subject_kind_raises_value_error(self, conn):
+        # DOCUMENT is a real EntityKind, but nothing a human can label — must
+        # raise a clear error, not a bare KeyError from the internal dicts.
+        with pytest.raises(ValueError, match="Cannot label"):
+            record_label(
+                conn,
+                "some-id",
+                "essentials/groceries",
+                _CATEGORY_PATHS,
+                subject_kind=EntityKind.DOCUMENT,
+            )

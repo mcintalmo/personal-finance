@@ -17,9 +17,10 @@
 > categorized with confidence + provenance across all four cascade stages (rules → embedding
 > similarity → local-LLM fallback → human review), rolled up through the taxonomy at every level.
 > Phase 5 (Line items) complete — demo verified 2026-07-25: a fake Amazon order-history export →
-> line items attached to the matching card charge, decomposed into splits → rules-categorized →
-> "spend on apples this year" queryable end-to-end (Costco/photo receipts deferred to Phase 9;
-> embedding/LLM/human-review parity for split categorization is a tracked follow-up, see Backlog).
+> line items attached to the matching card charge, decomposed into splits → categorized through
+> the full four-stage cascade (rules → embedding similarity → local-LLM fallback → human review) →
+> "spend on apples this year" queryable end-to-end, with a human override changing a spend rollup
+> live (Costco/photo receipts deferred to Phase 9).
 
 Costco has no order-history export (confirmed against docs/source-schemas.md — in-app digital
 receipts only), so Phase 5 targets Amazon only for now; Costco (and other photo/PDF-only
@@ -28,9 +29,8 @@ receipts) stays in Phase 9 until vision-LLM parsing exists.
 - [x] Amazon order-history CSV ingestion: see Done below.
 - [x] Amazon order ↔ card-charge matching: see Done below.
 - [x] Transaction decomposition into splits, keyed off matched order line items: see Done below.
-- [x] Line-item categorization, rules stage (enables "spend on apples this year"): see Done below.
-      Embedding-similarity / local-LLM / human-review stages for splits, mirroring the transaction
-      cascade's stages 2-4, are a follow-up refinement — not required for this phase's demo bar.
+- [x] Line-item categorization through the full cascade (rules, embedding similarity, local-LLM
+      fallback, human review) — enables "spend on apples this year": see Done below.
 
 ## Backlog (later phases)
 
@@ -42,14 +42,17 @@ one phase at a time when the previous phase's demo is complete.
 - [x] Merchant normalization evaluation + config-driven aliases: see Done below.
 - [x] Merchant resolution for the outlier tail: see Done below.
 
-**Phase 5 split-categorization follow-ups** (deferred — not required for Phase 5's demo bar):
+**CLI polish** (pre-existing gap, affects both cascades — not scoped to any one phase):
 
-- [ ] Embedding-similarity stage for splits (mirroring `silver_transaction_categories_embedding`)
-- [ ] Local-LLM fallback stage for splits (mirroring `silver_transaction_categories_llm`)
-- [ ] Human-review stage for splits (`EntityKind.SPLIT` exists on the `Label`/`Link` app models, but
-      `personal_finance.review.record_label` currently hardcodes `subject_kind=EntityKind.TRANSACTION`
-      — needs generalizing, plus a CLI path and a `silver_split_categories_all` union, mirroring
-      `silver_transaction_categories_all`)
+- [ ] `pf transform` hardcodes its dbt `--vars` to only `known_cities`; `embedding_model`/
+      `llm_model`/`*_confidence_threshold` always fall back to their defaults
+      (`nomic-embed-text`/`phi3:mini`/etc.) regardless of what `--model` a user passed to
+      `pf enrich`/`pf classify`. A user who overrides the model on enrich/classify won't see it
+      picked up by `pf transform` unless they also override `Settings.ollama.*` to match — found
+      while live-verifying the split-categorization cascade with `pf classify --model qwen2.5:3b`
+      (had to invoke `dbt build --vars` directly, bypassing `pf transform`, to prove the mechanism).
+      Needs `pf transform` to expose matching `--embedding-model`/`--llm-model`/etc. options (or
+      read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
 
@@ -138,6 +141,32 @@ one phase at a time when the previous phase's demo is complete.
       `sum(-amount) from silver_split_categories join silver_amazon_splits ... where category =
       'apples'` → `$32.03` across 3 matched line items — the phase's exact target query works
       (2026-07-25).
+- [x] Line-item categorization, embedding/LLM/human-review parity (Phase 5): the remaining three
+      cascade stages for splits, mirroring the transaction cascade exactly. New app tables
+      `product_embeddings`/`product_llm_categories` (own tables, not merged into
+      `merchant_embeddings`/`merchant_llm_categories` — a product name and a merchant name are
+      different vocabularies; comparing one's embedding against the other's reference set would be
+      a nonsensical nearest-neighbor match) plus `ProductEmbedding`/`ProductLlmCategory` Pydantic
+      models. `personal_finance.embed.compute_missing_product_embeddings`,
+      `personal_finance.llm_categorize.compute_missing_product_llm_categories`
+      (`LlmCategorizeClient.classify` gained a `subject_kind` param so one prompt-builder serves
+      both merchants and products). New dbt models `silver_split_categories_embedding/_llm/_human/_all`,
+      structurally identical to their transaction counterparts. Generalized
+      `personal_finance.review.record_label`/added `fetch_split_review_queue` — `record_label` now
+      takes a `subject_kind: EntityKind` (default `TRANSACTION`, so every existing positional call
+      site kept working unchanged) instead of hardcoding transaction, resolving the gap this file's
+      own backlog flagged after Phase 5 stage 4. `pf enrich`/`pf classify` now process merchants and
+      split products in one invocation; `pf review list`/`pf review label` gained `--kind
+      transaction|split`. **Live-verified end-to-end** against a real local Ollama
+      (`qwen2.5:3b` — the only model pulled locally; `phi3:mini`/`nomic-embed-text` aren't, so the
+      embedding stage was verified via the dbt-level test fixture's synthetic vectors instead of a
+      real embed call): built a 3-month warehouse (183/183 dbt checks green), `pf review list
+      --kind split` showed 12 uncategorized line items, `pf classify --model qwen2.5:3b` classified
+      all 12 for real, `dbt build --vars '{"llm_model": "qwen2.5:3b"}'` (see the CLI-polish backlog
+      note below — `pf transform` itself doesn't expose this override yet) brought uncategorized
+      splits to 0, then `pf review label ... --kind split` overrode one item to `essentials/groceries
+      /apples` and confirmed both the `categorization_source` flipped to `human` and the "spend on
+      apples" rollup grew from $91.65-equivalent to $112.57 to include it (2026-07-25).
 - [x] Merchant resolution for the outlier tail (Phase 3 follow-up): embedding-similarity
       merge-candidate review queue, human-confirmed only — mis-merging two distinct real
       merchants silently corrupts spend history in a way a wrong category doesn't, so

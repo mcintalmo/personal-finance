@@ -26,6 +26,8 @@ from personal_finance.models import (
     MerchantLlmCategory,
     MerchantMerge,
     MergeStatus,
+    ProductEmbedding,
+    ProductLlmCategory,
     Rule,
     Transaction,
     TransactionSplit,
@@ -40,6 +42,8 @@ EXPECTED_TABLES = {
     "merchant_merges",
     "merchant_embeddings",
     "merchant_llm_categories",
+    "product_embeddings",
+    "product_llm_categories",
     "transactions",
     "transaction_splits",
     "documents",
@@ -113,6 +117,17 @@ class TestRoundTrip:
             category_id=groceries.id,
             confidence=0.85,
         )
+        product_embedding = ProductEmbedding(
+            product_name="Organic Gala Apples, 3 lb Bag",
+            model="nomic-embed-text",
+            embedding=[0.1, 0.2, 0.3],
+        )
+        product_llm_category = ProductLlmCategory(
+            product_name="Organic Gala Apples, 3 lb Bag",
+            model="qwen2.5:3b",
+            category_id=groceries.id,
+            confidence=0.85,
+        )
         txn = Transaction(
             account_id=account.id,
             posted_on=date(2026, 7, 1),
@@ -157,6 +172,8 @@ class TestRoundTrip:
         insert(conn, "merchant_merges", merchant_merge)
         insert(conn, "merchant_embeddings", merchant_embedding)
         insert(conn, "merchant_llm_categories", merchant_llm_category)
+        insert(conn, "product_embeddings", product_embedding)
+        insert(conn, "product_llm_categories", product_llm_category)
         insert(conn, "transactions", txn)
         insert(conn, "transaction_splits", split)
         insert(conn, "documents", doc, parsed_payload=json.dumps({"total": "42.50"}))
