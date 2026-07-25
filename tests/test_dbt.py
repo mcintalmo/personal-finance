@@ -15,11 +15,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from personal_finance.callouts import CalloutKind, detect_callouts
 from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id, product_embedding_id
 from personal_finance.forecast import compute_forecasts
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id, product_llm_category_id
+from personal_finance.models import ForecastSeriesKind
 from personal_finance.seed import seed_budgets, seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.synth import (
     generate_amazon_orders,
@@ -2165,8 +2167,9 @@ class TestGoldBudgetActuals:
 @pytest.fixture(scope="module")
 def recurring_warehouse(tmp_path_factory):
     """A seeded warehouse with 6 months of synth activity (enough occurrences
-    for gold_recurring_expenses' >= 3-occurrence heuristic to fire on the
-    fixture's monthly rent/subscription charges), with dbt build run once."""
+    for gold_recurring_flows' >= 3-occurrence heuristic to fire on the
+    fixture's monthly rent/subscription charges and semi-monthly payroll),
+    with dbt build run once."""
     root = tmp_path_factory.mktemp("wh")
     warehouse = root / "warehouse.duckdb"
     bronze = root / "bronze"
@@ -2208,12 +2211,12 @@ def recurring_warehouse(tmp_path_factory):
     return warehouse
 
 
-class TestGoldRecurringExpenses:
+class TestGoldRecurringFlows:
     def test_detects_known_subscriptions_and_rent(self, recurring_warehouse):
         with duckdb.connect(str(recurring_warehouse)) as conn:
             rows = conn.execute(
                 "select merchant_name, amount, cadence, occurrence_count "
-                "from main_gold.gold_recurring_expenses "
+                "from main_gold.gold_recurring_flows "
                 "where merchant_name in ('NETFLIX', 'SPOTIFY', 'CITYLINE APARTMENTS RENT')"
             ).fetchall()
         found = {name: (amount, cadence, count) for name, amount, cadence, count in rows}
@@ -2223,37 +2226,65 @@ class TestGoldRecurringExpenses:
         assert found["SPOTIFY"] == (Decimal("11.99"), "monthly", 6)
         assert found["CITYLINE APARTMENTS RENT"] == (Decimal("1800.00"), "monthly", 6)
 
+    def test_detects_recurring_income(self, recurring_warehouse):
+        # The synth scenario pays $2,500 on the 1st and the 15th, so gaps
+        # alternate 14 and 16-17 days — an average of ~15, which lands in the
+        # biweekly bucket. This is the case the biweekly range exists for:
+        # without it the paycheck falls between the weekly and monthly ranges
+        # and the most predictable flow in the ledger goes undetected.
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            row = conn.execute(
+                "select flow, amount, cadence, occurrence_count, avg_gap_days "
+                "from main_gold.gold_recurring_flows "
+                "where merchant_name = 'ACME CORP PAYROLL'"
+            ).fetchone()
+        assert row is not None, "semi-monthly payroll should be detected as recurring income"
+        flow, amount, cadence, count, avg_gap_days = row
+        assert flow == "inflow"
+        assert amount == Decimal("2500.00")
+        assert cadence == "biweekly"
+        assert count == 12  # two paydays a month over six months
+        assert 12 <= avg_gap_days <= 16
+
     def test_excludes_random_one_off_spend(self, recurring_warehouse):
         # Groceries/gas/dining/Amazon are random-amount, random-occurrence spend
         # in the synth scenario — none of it should clear the >= 3-occurrences,
-        # regular-cadence bar. Only the three fixed-amount monthly charges should.
+        # regular-cadence bar. Only the fixed-amount monthly charges and the
+        # semi-monthly paycheck should.
         with duckdb.connect(str(recurring_warehouse)) as conn:
             (merchant_names,) = conn.execute(
-                "select list(distinct merchant_name) from main_gold.gold_recurring_expenses"
+                "select list(distinct merchant_name) from main_gold.gold_recurring_flows"
             ).fetchone()
-        assert set(merchant_names) == {"NETFLIX", "SPOTIFY", "CITYLINE APARTMENTS RENT"}
+        assert set(merchant_names) == {
+            "NETFLIX",
+            "SPOTIFY",
+            "CITYLINE APARTMENTS RENT",
+            "ACME CORP PAYROLL",
+        }
 
-    def test_excludes_transfers_and_income(self, recurring_warehouse):
+    def test_excludes_transfers(self, recurring_warehouse):
+        # The card-autopay pair is a fixed-cadence, same-amount movement and
+        # would otherwise be the most "recurring" thing in the ledger — but
+        # it is money moving between the user's own accounts, not a flow.
         with duckdb.connect(str(recurring_warehouse)) as conn:
-            (payroll_count,) = conn.execute(
-                "select count(*) from main_gold.gold_recurring_expenses "
-                "where merchant_name = 'ACME CORP PAYROLL'"
-            ).fetchone()
             (card_payment_count,) = conn.execute(
-                "select count(*) from main_gold.gold_recurring_expenses "
+                "select count(*) from main_gold.gold_recurring_flows "
                 "where merchant_name like '%CREDIT CRD AUTOPAY%'"
             ).fetchone()
-        assert payroll_count == 0  # inflow, not an expense
-        assert card_payment_count == 0  # transfer leg, excluded via is_transfer
+        assert card_payment_count == 0
 
     def test_amount_is_positive_and_cadence_is_regular(self, recurring_warehouse):
         with duckdb.connect(str(recurring_warehouse)) as conn:
             rows = conn.execute(
-                "select amount, avg_gap_days, gap_days_stddev from main_gold.gold_recurring_expenses"
+                "select flow, amount, avg_gap_days, gap_days_stddev "
+                "from main_gold.gold_recurring_flows"
             ).fetchall()
         assert rows
-        for amount, avg_gap_days, gap_days_stddev in rows:
+        for flow, amount, avg_gap_days, gap_days_stddev in rows:
+            # Published as a magnitude regardless of direction — `flow` carries
+            # the sign, so a consumer never has to guess at the convention.
             assert amount > 0
+            assert flow in {"inflow", "outflow"}
             assert gap_days_stddev <= avg_gap_days * 0.25
 
 
@@ -2355,6 +2386,22 @@ class TestGoldForecasts:
         # CITYLINE RENT 1800.00 + NETFLIX 15.49 + SPOTIFY 11.99
         assert committed == Decimal("1827.48")
 
+    def test_recurring_income_lands_in_the_committed_component(self, forecast_warehouse):
+        """The inflow half of the same property. The synth scenario pays
+        $2,500 on the 1st and the 15th, so once recurring detection covers
+        inflows, income is almost entirely committed — and the model is left
+        predicting only what varies instead of re-deriving a known salary.
+        """
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            rows = conn.execute(
+                "select committed_amount from main_gold.gold_forecasts "
+                "where series_key = 'total_inflow' order by horizon"
+            ).fetchall()
+        assert rows
+        # Two $2,500 paydays projected into each forecast month.
+        assert [committed for (committed,) in rows] == [Decimal("5000.00")] * len(rows)
+
     def test_fully_recurring_category_gets_a_zero_width_interval(self, forecast_warehouse):
         """The property the decomposition exists for: the Streaming budget is
         100% subscriptions, so there is nothing uncertain left to widen it."""
@@ -2400,3 +2447,51 @@ class TestGoldForecasts:
             (total,) = conn.execute("select count(*) from forecasts").fetchone()
         assert again == written
         assert total == written
+
+
+class TestCalloutsOverRealMarts:
+    """`detect_callouts` reuses `forecast.load_series`, so it depends on the
+    same gold SQL. The statistical decisions are unit-tested in
+    test_callouts.py; what this class proves is that the queries run against a
+    real warehouse and that the feed refers to series that actually exist.
+    """
+
+    def test_produces_a_feed_from_the_marts(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+        assert feed.forecasts_available is True
+        for callout in feed.callouts:
+            assert callout.title
+            assert callout.detail
+            assert callout.series_key
+
+    def test_every_callout_names_a_real_series(self, forecast_warehouse):
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+            known = {
+                key
+                for (key,) in conn.execute(
+                    "select distinct series_key from main_gold.gold_forecasts"
+                ).fetchall()
+            }
+        assert {c.series_key for c in feed.callouts} <= known
+
+    def test_budget_risk_callouts_only_target_budgeted_series(self, forecast_warehouse):
+        """A budget-risk callout on a total would be comparing a whole month's
+        spend to one category's cap."""
+        warehouse, _ = forecast_warehouse
+        with duckdb.connect(str(warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+        for callout in feed.callouts:
+            if callout.kind is CalloutKind.BUDGET_RISK:
+                assert callout.series_kind is ForecastSeriesKind.BUDGET_CATEGORY
+
+    def test_reports_no_forecasts_when_none_have_been_computed(self, recurring_warehouse):
+        """The other fixture never runs `pf forecast`, so the trend half of
+        the feed is unavailable and has to say so."""
+        with duckdb.connect(str(recurring_warehouse)) as conn:
+            feed = detect_callouts(conn, today=date(2026, 7, 15))
+        assert feed.forecasts_available is False
+        assert all(c.kind in {CalloutKind.SPIKE, CalloutKind.DIP} for c in feed.callouts)

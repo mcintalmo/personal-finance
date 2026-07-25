@@ -15,6 +15,8 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf classify    ask a local LLM to categorize merchants/split products stages 1-2 missed
     pf review      list the categorization cascade's ambiguous tail (--kind transaction|split)
                    and record corrections
+    pf forecast    project the next few months of spend/income into the forecasts table
+    pf callouts    show what changed: spending spikes, trends, and budgets at risk
 """
 
 import json
@@ -27,6 +29,7 @@ from typing import TYPE_CHECKING
 import duckdb
 import typer
 
+from personal_finance.callouts import detect_callouts
 from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
 from personal_finance.embed import (
@@ -454,9 +457,10 @@ def forecast(
     """Forecast spend and income for the next few months.
 
     Forecasts total income, total spend, and each configured budget's category
-    subtree. Each month is split into its committed part (recurring charges
-    projected forward from `gold_recurring_expenses`) and its variable part
-    (statistically modelled) — only the variable part carries uncertainty.
+    subtree. Each month is split into its committed part (recurring flows —
+    charges on the spend side, salary on the income side — projected forward
+    from `gold_recurring_flows`) and its variable part (statistically
+    modelled); only the variable part carries uncertainty.
 
     Requires `pf transform` to have run at least once. Series with fewer than
     six complete months of history are skipped rather than guessed at. Re-run
@@ -472,7 +476,7 @@ def forecast(
         _require_transform_built(conn)
         # forecast reads the gold layer, not just silver — a partially-built
         # warehouse would otherwise fail with a raw CatalogException.
-        _require_gold_built(conn, "gold_recurring_expenses")
+        _require_gold_built(conn, "gold_recurring_flows")
         _require_gold_built(conn, "gold_line_items")
         _require_gold_built(conn, "gold_category_ancestors")
         written = compute_forecasts(conn, horizon=horizon, interval_level=interval)
@@ -485,6 +489,42 @@ def forecast(
         f"Wrote {written} forecast row(s) at {interval}% interval. "
         "Run `pf transform` to publish gold_forecasts."
     )
+
+
+@app.command()
+def callouts(
+    limit: int = typer.Option(10, min=1, help="Maximum callouts to show, most notable first."),
+) -> None:
+    """Show what changed: spending spikes, trends, and budgets at risk.
+
+    Computed on demand from the marts — there is nothing to cache and no
+    table to rebuild, so this is always current as of the last `pf transform`
+    and `pf forecast`. Trend and budget-risk callouts need `pf forecast` to
+    have run; anomaly callouts do not.
+    """
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    with duckdb.connect(str(warehouse)) as conn:
+        _require_transform_built(conn)
+        _require_gold_built(conn, "gold_recurring_flows")
+        _require_gold_built(conn, "gold_line_items")
+        _require_gold_built(conn, "gold_category_ancestors")
+        feed = detect_callouts(conn, limit=limit)
+
+    if not feed.forecasts_available:
+        typer.echo(
+            "No forecasts yet — run `pf forecast` for trend and budget-risk callouts.", err=True
+        )
+    if not feed.callouts:
+        typer.echo("Nothing notable to report.")
+        return
+    for callout in feed.callouts:
+        typer.echo(f"[{callout.level.value.upper()}] {callout.title}")
+        typer.echo(f"    {callout.detail}")
 
 
 @app.command()

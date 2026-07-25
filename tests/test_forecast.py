@@ -20,20 +20,20 @@ from personal_finance.forecast import (
     _add_months,
     _candidate_models,
     _conformal_half_widths,
-    _last_complete_month,
     _mean_absolute_naive_error,
     _project_committed,
     _rolling_origin_errors,
     _safe_forecast,
     fit_variable,
     forecast_series,
+    last_complete_month,
     trend_direction,
 )
 from personal_finance.models import ForecastSeriesKind, TrendDirection
 
 
 def _monthly(amount: float, last_seen_on: date = date(2026, 6, 1)) -> RecurringGroup:
-    return RecurringGroup("RENT", amount, "monthly", 30.4, last_seen_on, None)
+    return RecurringGroup("RENT", "outflow", amount, "monthly", 30.4, last_seen_on, None)
 
 
 def _history(
@@ -85,7 +85,7 @@ class TestLastCompleteMonth:
         ],
     )
     def test_excludes_the_current_month(self, today: date, expected: date) -> None:
-        assert _last_complete_month(today) == expected
+        assert last_complete_month(today) == expected
 
 
 class TestCandidateModels:
@@ -298,13 +298,17 @@ class TestProjectCommittedCadence:
     triples quarterly ones."""
 
     def test_monthly_charge_lands_in_every_month(self) -> None:
-        groups = (RecurringGroup("RENT", 1800.0, "monthly", 30.4, date(2026, 6, 1), None),)
+        groups = (
+            RecurringGroup("RENT", "outflow", 1800.0, "monthly", 30.4, date(2026, 6, 1), None),
+        )
         assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([1800.0] * 3)
 
     def test_annual_charge_does_not_vanish(self) -> None:
         """It is removed from the variable series, so if it also projects as
         zero the money simply disappears from the forecast."""
-        groups = (RecurringGroup("INSURANCE", 600.0, "yearly", 365.0, date(2026, 6, 15), None),)
+        groups = (
+            RecurringGroup("INSURANCE", "outflow", 600.0, "yearly", 365.0, date(2026, 6, 15), None),
+        )
         # next charge is ~2027-06-15, outside a 3-month horizon
         assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([0.0] * 3)
         # ...but inside a horizon that reaches it, it appears exactly once
@@ -313,13 +317,17 @@ class TestProjectCommittedCadence:
         assert sorted(twelve)[-1] == pytest.approx(600.0)
 
     def test_quarterly_charge_is_not_smeared_across_every_month(self) -> None:
-        groups = (RecurringGroup("WATER", 300.0, "quarterly", 91.0, date(2026, 6, 10), None),)
+        groups = (
+            RecurringGroup("WATER", "outflow", 300.0, "quarterly", 91.0, date(2026, 6, 10), None),
+        )
         projected = _project_committed(groups, date(2026, 6, 1), 3)
         assert sum(projected) == pytest.approx(300.0)  # exactly one charge, not three
 
     def test_lapsed_subscription_stops_being_committed(self) -> None:
         """Cancelled six months ago; it should not be projected forward."""
-        groups = (RecurringGroup("OLD GYM", 40.0, "monthly", 30.4, date(2025, 12, 1), None),)
+        groups = (
+            RecurringGroup("OLD GYM", "outflow", 40.0, "monthly", 30.4, date(2025, 12, 1), None),
+        )
         assert _project_committed(groups, date(2026, 6, 1), 3) == pytest.approx([0.0] * 3)
 
     def test_no_groups_projects_zero(self) -> None:
@@ -358,7 +366,9 @@ class TestForecastRowInvariants:
         history = _history(
             [0.0] * 8,
             [1.005] * 8,
-            recurring=(RecurringGroup("X", 1.005, "monthly", 30.4, date(2026, 6, 1), None),),
+            recurring=(
+                RecurringGroup("X", "outflow", 1.005, "monthly", 30.4, date(2026, 6, 1), None),
+            ),
         )
         for row in forecast_series(history, date(2026, 6, 1), horizon=3):
             assert row.predicted_amount == row.committed_amount + row.variable_amount

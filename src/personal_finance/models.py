@@ -321,9 +321,10 @@ class Forecast(Entity):
 
     ``predicted_amount`` is always ``committed_amount + variable_amount``:
 
-    * **committed** — recurring charges due that month (rent, subscriptions),
-      projected forward deterministically from ``gold_recurring_expenses`` on
-      each group's own observed cadence. Known, not estimated.
+    * **committed** — recurring flows due that month (rent and subscriptions
+      for a spend series, salary for the income one), projected forward
+      deterministically from ``gold_recurring_flows`` on each group's own
+      observed cadence. Known, not estimated.
     * **variable** — everything else, from a statistical model fit to the
       history with the committed component removed.
 

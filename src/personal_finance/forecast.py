@@ -3,18 +3,19 @@
 Personal cash flow is two processes with different dynamics, so this module
 forecasts them separately and adds the results:
 
-* **Committed** — recurring charges (rent, subscriptions). These are already
-  detected by ``gold_recurring_expenses``, so they are *projected* forward on
-  each group's own observed cadence rather than forecast. Deterministic:
-  they contribute to the point estimate at full weight and to the prediction
-  interval at **zero width**.
+* **Committed** — recurring flows in either direction: charges (rent,
+  subscriptions) on the spend side, and income (salary, pension) on the
+  inflow side. These are already detected by ``gold_recurring_flows``, so
+  they are *projected* forward on each group's own observed cadence rather
+  than forecast. Deterministic: they contribute to the point estimate at full
+  weight and to the prediction interval at **zero width**.
 * **Variable** — everything else. This is the only genuinely uncertain part,
   and the only part a statistical model is asked to predict.
 
-``gold_recurring_expenses`` detects outflows only, so the income series has
-no committed component and is modelled in full. That is a real limitation,
-not an oversight: a salary is highly predictable and would benefit from the
-same treatment if recurring detection is ever extended to inflows.
+Both totals therefore get the decomposition. Income benefits from it the most
+of any series: a salary is the single most predictable flow in a personal
+ledger, and modelling it statistically would attach an interval to a number
+that is actually known.
 
 Modelling the aggregate directly would blend a near-deterministic series with
 a noisy one, inflate the interval on categories that are mostly subscriptions,
@@ -31,7 +32,7 @@ grain over a personal ledger:
   history length (see :func:`_candidate_models`).
 * **The current month is incomplete.** Training on a partial month drags the
   last point down and makes every model forecast a decline. History is always
-  truncated to the last *complete* month (:func:`_last_complete_month`).
+  truncated to the last *complete* month (:func:`last_complete_month`).
 * **Cold start is explicit.** Below :data:`MIN_HISTORY_MONTHS` no forecast is
   produced at all, rather than a confidently wrong number.
 """
@@ -85,17 +86,19 @@ _CENT = Decimal("0.01")
 
 @dataclass(frozen=True)
 class RecurringGroup:
-    """One detected recurring charge, as published by gold_recurring_expenses.
+    """One detected recurring flow, as published by gold_recurring_flows.
 
-    ``amount`` is a positive magnitude and ``avg_gap_days`` is the observed
-    spacing between charges — which is what makes cadence-aware projection
-    possible: a yearly premium lands in one specific future month, not smeared
-    across every month of the horizon.
+    ``amount`` is a positive magnitude and ``flow`` says which direction it
+    moved, so a group is only ever added to the matching series (a paycheck
+    must not offset rent). ``avg_gap_days`` is the observed spacing, which is
+    what makes cadence-aware projection possible: a yearly premium lands in
+    one specific future month, not smeared across every month of the horizon.
     """
 
     merchant_name: str
+    flow: str  # inflow | outflow
     amount: float
-    cadence: str  # weekly | monthly | quarterly | yearly
+    cadence: str  # weekly | biweekly | monthly | quarterly | yearly
     avg_gap_days: float
     last_seen_on: date
     category_id: str | None
@@ -155,7 +158,7 @@ def _add_months(day: date, months: int) -> date:
     return date(day.year + year_delta, month + 1, 1)
 
 
-def _last_complete_month(today: date) -> date:
+def last_complete_month(today: date) -> date:
     """Return the first day of the most recent *complete* month.
 
     The current month is always partial, and training on it makes every model
@@ -478,7 +481,9 @@ def forecast_series(
 _CADENCE_MONTHS = {"monthly": 1, "quarterly": 3, "yearly": 12}
 """Calendar-month step per cadence. Stepping by avg_gap_days instead drifts:
 30.4-day hops from a June charge put two "monthly" charges in July and none in
-some later month."""
+some later month. Weekly and biweekly are deliberately absent — they really
+are fixed day counts, and a fortnightly paycheck genuinely does land three
+times in some months, so day-stepping is the correct projection there."""
 
 
 def _next_charge(charge_on: date, cadence: str, avg_gap_days: float) -> date:
@@ -540,9 +545,10 @@ def _project_committed(
 
 # ── Warehouse I/O ───────────────────────────────────────────────
 # Every series is built dense (zero-filled across a month spine) and split into
-# its committed/variable halves in SQL. A charge counts as committed when its
-# (merchant_name, amount) matches a detected recurring group — the same key
-# gold_recurring_expenses groups on.
+# its committed/variable halves in SQL. A transaction counts as committed when
+# its (merchant_name, flow, magnitude) matches a detected recurring group — the
+# same key gold_recurring_flows groups on. Matching on flow as well as amount
+# keeps a $40 refund from being tagged as the committed $40 subscription.
 
 _TOTALS_SQL = """
 WITH spine AS (
@@ -553,10 +559,12 @@ tagged AS (
         date_trunc('month', t.posted_on)::DATE AS month,
         t.amount,
         t.flow,
-        r.recurring_expense_id IS NOT NULL AS is_committed
+        r.recurring_flow_id IS NOT NULL AS is_committed
     FROM main_silver.silver_transactions AS t
-    LEFT JOIN main_gold.gold_recurring_expenses AS r
-        ON r.merchant_name = t.merchant_name AND r.amount = -t.amount
+    LEFT JOIN main_gold.gold_recurring_flows AS r
+        ON r.merchant_name = t.merchant_name
+        AND r.flow = t.flow
+        AND r.amount = abs(t.amount)
     WHERE NOT t.is_transfer
 )
 SELECT
@@ -580,11 +588,13 @@ line_items AS (
         date_trunc('month', li.posted_on)::DATE AS month,
         li.amount,
         li.category_id,
-        r.recurring_expense_id IS NOT NULL AS is_committed
+        r.recurring_flow_id IS NOT NULL AS is_committed
     FROM main_gold.gold_line_items AS li
     INNER JOIN main_silver.silver_transactions AS t USING (transaction_id)
-    LEFT JOIN main_gold.gold_recurring_expenses AS r
-        ON r.merchant_name = t.merchant_name AND r.amount = -t.amount
+    LEFT JOIN main_gold.gold_recurring_flows AS r
+        ON r.merchant_name = t.merchant_name
+        AND r.flow = t.flow
+        AND r.amount = abs(t.amount)
     WHERE li.amount < 0 AND li.category_id IS NOT NULL
 ),
 -- A budget covers its whole category subtree (essentials/groceries also
@@ -621,10 +631,11 @@ SELECT date_trunc('month', min(posted_on))::DATE FROM main_silver.silver_transac
 
 # Each detected recurring group, with the category it most often lands in so a
 # budget can claim the ones inside its subtree. A group with no categorized
-# line item still appears (category_id NULL) and counts toward total spend.
+# line item still appears (category_id NULL) and counts toward the totals.
 _RECURRING_GROUPS_SQL = """
 SELECT
     r.merchant_name,
+    r.flow,
     r.amount,
     r.cadence,
     r.avg_gap_days,
@@ -634,13 +645,14 @@ SELECT
         FROM main_silver.silver_transactions AS t
         INNER JOIN main_gold.gold_line_items AS li USING (transaction_id)
         WHERE t.merchant_name = r.merchant_name
-          AND -t.amount = r.amount
+          AND t.flow = r.flow
+          AND abs(t.amount) = r.amount
           AND li.category_id IS NOT NULL
         GROUP BY li.category_id
         ORDER BY count(*) DESC, li.category_id
         LIMIT 1
     ) AS category_id
-FROM main_gold.gold_recurring_expenses AS r
+FROM main_gold.gold_recurring_flows AS r
 """
 
 # Which categories fall inside each budget's subtree.
@@ -666,7 +678,7 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
     """Read every forecastable series from the warehouse, decomposed.
 
     ``trained_through`` is the last month included — always a *complete* one
-    (see :func:`_last_complete_month`).
+    (see :func:`last_complete_month`).
     """
     # Start at the ledger's own first month, not blindly _HISTORY_WINDOW_MONTHS
     # back: padding the front with zero months for a period the user simply
@@ -687,16 +699,19 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
     groups = tuple(
         RecurringGroup(
             merchant_name=name,
+            flow=flow,
             amount=float(amount),
             cadence=cadence,
             avg_gap_days=float(avg_gap_days),
             last_seen_on=last_seen_on,
             category_id=category_id,
         )
-        for name, amount, cadence, avg_gap_days, last_seen_on, category_id in conn.execute(
+        for name, flow, amount, cadence, avg_gap_days, last_seen_on, category_id in conn.execute(
             _RECURRING_GROUPS_SQL
         ).fetchall()
     )
+    inflow_groups = tuple(g for g in groups if g.flow == "inflow")
+    outflow_groups = tuple(g for g in groups if g.flow == "outflow")
     subtree: dict[str, set[str]] = {}
     for budget_id, category_id in conn.execute(_BUDGET_SUBTREE_SQL).fetchall():
         subtree.setdefault(budget_id, set()).add(category_id)
@@ -712,9 +727,7 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             months=months,
             committed=tuple(float(row[1]) for row in rows),
             variable=tuple(float(row[2]) for row in rows),
-            # gold_recurring_expenses only detects outflows, so income has no
-            # committed component to project — it is modelled in full.
-            recurring=(),
+            recurring=inflow_groups,
         ),
         SeriesHistory(
             kind=ForecastSeriesKind.TOTAL_OUTFLOW,
@@ -724,7 +737,7 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             months=months,
             committed=tuple(float(row[3]) for row in rows),
             variable=tuple(float(row[4]) for row in rows),
-            recurring=groups,
+            recurring=outflow_groups,
         ),
     ]
 
@@ -748,7 +761,12 @@ def load_series(conn: duckdb.DuckDBPyConnection, trained_through: date) -> list[
             months=tuple(entry.months),
             committed=tuple(entry.committed),
             variable=tuple(entry.variable),
-            recurring=tuple(g for g in groups if g.category_id in subtree.get(budget_id, set())),
+            # Outflow groups only: a budget measures spend (the history side
+            # filters to li.amount < 0), so a refund or a paycheck landing in
+            # the subtree must not be projected as committed spend.
+            recurring=tuple(
+                g for g in outflow_groups if g.category_id in subtree.get(budget_id, set())
+            ),
         )
         for budget_id, entry in by_budget.items()
     )
@@ -782,7 +800,7 @@ def compute_forecasts(
     number of forecast rows written.
     """
     horizon = max(1, min(horizon, MAX_HORIZON))
-    trained_through = _last_complete_month(today or date.today())
+    trained_through = last_complete_month(today or date.today())
 
     rows: list[Forecast] = []
     for history in load_series(conn, trained_through):

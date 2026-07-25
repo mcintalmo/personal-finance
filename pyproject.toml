@@ -55,6 +55,7 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=7.0",
     "pre-commit>=4.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 # ── uv ──────────────────────────────────────────────────────
@@ -173,6 +174,15 @@ addopts = [
     "--cov-report=xml:coverage.xml",
     "-v",
     "--tb=short",
+    # Parallelise across CPUs. `loadfile` (not the default `load`, nor
+    # `loadscope`) is load-bearing: the warehouse fixtures in test_dbt.py are
+    # module-scoped, and each one costs a full dbt build. Any mode that splits
+    # a file across workers makes every worker rebuild the fixtures its share
+    # of the tests needs, which is slower than running serially. `loadfile`
+    # keeps a file on one worker, so module-scoped fixtures are still built
+    # exactly once, and the parallelism comes from running whole files at once.
+    "-n=auto",
+    "--dist=loadfile",
 ]
 filterwarnings = [
     "error",               # treat warnings as errors (remove if too strict)

@@ -40,6 +40,27 @@ def get(path: str, **params: Any) -> Any:
     return _request("GET", path, params=params)
 
 
+def get_optional(path: str, **params: Any) -> Any | None:
+    """Fetch a supplementary section, returning None instead of stopping the page.
+
+    `get` calls `st.stop()` on an error response, which is right when the
+    endpoint *is* the page. It is wrong for a secondary band bolted onto
+    another page: a warehouse built before that endpoint's marts existed would
+    take the whole page down over a section the user didn't come for. A
+    connection failure still stops — that means the API is gone entirely, and
+    nothing else on the page will render either.
+    """
+    try:
+        response = httpx.get(f"{API_URL}{path}", params=params, timeout=10.0)
+        response.raise_for_status()
+    except httpx.ConnectError:
+        st.error(f"Can't reach the API at {API_URL} — run `pf serve` in another terminal.")
+        st.stop()
+    except httpx.HTTPStatusError:
+        return None
+    return response.json()
+
+
 def post(path: str, json: dict[str, Any]) -> Any:
     return _request("POST", path, json=json)
 

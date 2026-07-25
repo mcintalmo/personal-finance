@@ -21,6 +21,7 @@ import duckdb
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from personal_finance.callouts import CalloutFeed, detect_callouts
 from personal_finance.config import get_settings
 from personal_finance.exceptions import ConfigurationError, NotFoundError
 from personal_finance.llm_categorize import fetch_category_paths
@@ -237,6 +238,21 @@ def budgets(conn: Conn) -> list[BudgetActual]:
         )
         for row in rows
     ]
+
+
+@app.get("/callouts")
+def callouts(conn: Conn, limit: int | None = None) -> CalloutFeed:
+    """Ranked trend/anomaly observations, computed on demand.
+
+    Needs the same gold models the forecaster reads, since it reuses
+    `forecast.load_series` for the monthly histories rather than
+    re-deriving them.
+    """
+    _require_gold_built(conn)
+    _require_table_built(conn, "main_gold", "gold_recurring_flows")
+    _require_table_built(conn, "main_gold", "gold_line_items")
+    _require_table_built(conn, "main_gold", "gold_category_ancestors")
+    return detect_callouts(conn, limit=limit)
 
 
 class TransactionReviewItem(BaseModel):

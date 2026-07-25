@@ -34,7 +34,7 @@ in Phase 9 until vision-LLM parsing exists.
 - [x] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence): see Done below.
 - [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
 - [x] Forecasting of spend/income (statsmodels): see Done below.
-- [ ] Trend and anomaly callouts on the dashboard
+- [x] Trend and anomaly callouts on the dashboard: see Done below.
 
 ## Backlog (later phases)
 
@@ -76,6 +76,71 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stages 3-4 — Trend/anomaly callouts, and recurring detection extended to inflows.
+
+      **Recurring detection now covers both directions.** `gold_recurring_expenses` became
+      `gold_recurring_flows`, with a `flow` column and a positive `amount` magnitude. The
+      detection heuristic was already direction-agnostic apart from a `where amount < 0`, so this
+      is one generalized model rather than a second near-duplicate one — a model named
+      `..._expenses` that contains salary would be comment rot by construction. Grouping is on the
+      *signed* amount so a merchant that both charges and refunds $40 stays two distinct groups.
+      A **biweekly** cadence bucket (`[12, 16]` days) was added specifically for income: a
+      fortnightly or semi-monthly paycheck averages ~14-15 days, which falls in the gap between
+      the weekly and monthly buckets — without it the whole inflow extension would have been a
+      no-op for the commonest salary cadence, silently. Verified end-to-end: the synth scenario's
+      $2,500 semi-monthly payroll is now detected (biweekly, 12 occurrences over 6 months) and
+      `gold_forecasts` carries $5,000/month of *committed* income where it previously carried
+      $0.00 and asked a statistical model to re-derive a known salary. The forecaster's
+      committed/variable join now matches on flow as well as magnitude, and budget series still
+      take outflow groups only — a paycheck landing in a budgeted subtree must not be projected
+      as committed spend.
+
+      **Callouts** — new `personal_finance.callouts` (`pf callouts`, `GET /callouts`, a
+      `6_Callouts.py` page plus a top-3 band on Overview). Three kinds: SPIKE/DIP (a recent month
+      far from that series' own typical month), TREND (from `gold_forecasts.trend`, compared
+      against the history average), and BUDGET_RISK (next month's forecast against the budget).
+      Deliberately **not persisted**, unlike forecasts: there is no expensive fit to cache, and a
+      callouts table would be a derivation of a derivation with its own staleness window between
+      `pf forecast` and the next `pf transform`. It reads the `forecasts` app table rather than
+      `gold_forecasts` for the same reason — a callout is a claim about right now.
+      Anomalies use the **modified z-score** (median + MAD, Iglewicz & Hoaglin, cutoff 3.5) rather
+      than mean/stddev: on a personal ledger the outlier is often several times the typical month
+      and would drag a mean and inflate a stddev enough to mask itself. Guards that exist to keep
+      the feed worth reading: a $50 absolute-deviation floor (a scale-free z-score makes $4 against
+      a $1 median look enormous and uninteresting), a 3-month recency window, a minimum of six
+      months of history, and a mean-absolute-deviation fallback for the mostly-zero categories
+      where MAD is exactly 0 — the very series where one big month matters most.
+      Severity is not a pure function of magnitude: rising spend and falling income are both
+      WARNING, rising income and falling spend are both INFO, and a budget overrun that survives
+      the low end of the forecast interval escalates to CRITICAL.
+      A test caught a real inverted conversion in the budget comparison — `_MONTHS_PER_PERIOD`
+      says how many months a period spans, so the monthly-equivalent cap is the budget *divided*
+      by it; multiplying turned a $6,000/year cap into $72,000 and would have made every yearly
+      budget read as permanently, silently under budget.
+
+      **Test suite sped up ~4x along the way** (measured, not estimated). `test_api.py` was
+      207s, of which 203s was fixture setup: `built_warehouse` was function-scoped, so ten tests
+      each paid a full init-db + synth + 3 ingests + dbt build (~20s) to exercise under three
+      seconds of assertions. It now builds once per session and each test gets a *copy* of the
+      file, keeping full isolation (one test writes labels) for the price of a file copy — 207s
+      to 24s. That copy needed an explicit `CHECKPOINT`: closing a DuckDB connection does not
+      fold the WAL into the database file, so copying `warehouse.duckdb` alone silently produced
+      a warehouse with the app tables but no silver views or gold tables, surfacing as a
+      baffling 503 from every endpoint.
+      Added `pytest-xdist` with `-n auto --dist loadfile`. `loadfile` is deliberate: the 13
+      module-scoped warehouse fixtures in `test_dbt.py` each cost a dbt build, and the default
+      `load` or `loadscope` would split a file across workers and make each one rebuild the
+      fixtures its share of the tests needs — slower than serial. That in turn required
+      isolating dbt's artifacts per worker (`DBT_TARGET_PATH`/`DBT_LOG_PATH` in
+      `tests/conftest.py`): dbt defaults both to `transform/target` and `transform/logs`, so
+      concurrent invocations from different workers would race on `partial_parse.msgpack` — a
+      corruption whose symptom is an unreproducible parse failure on an unrelated test.
+      Not done, and worth knowing: `dbt build` is 9.0s where `dbt run` is 3.5s, so data tests are
+      ~60% of every fixture's cost. Switching the fixtures that don't assert on data-test results
+      would save ~70s, but today those 13 builds re-validate all 215 data tests against 13
+      different data scenarios; only `TestDbtBuild` covers one. That is a real loss of coverage,
+      not a free win, so it was left alone.
 
 - [x] Phase 7 stage 2 — Spend/income forecasting: new `personal_finance.forecast` (`pf forecast`)
       + `gold_forecasts`. Forecasts total income, total spend, and every configured budget's
@@ -121,9 +186,10 @@ Phase 6 demo):
       **Known limitation, deliberately left:** income never gets a committed component, because
       `gold_recurring_expenses` detects outflows only — a salary is the most predictable flow in
       a personal ledger and would benefit from the same decomposition if recurring detection is
-      extended to inflows.
+      extended to inflows. *(Lifted in Phase 7 stage 3 — see above.)*
 
 - [x] Phase 7 stage 1 — Recurring-expense detection: new `gold_recurring_expenses` dbt model
+      *(renamed to `gold_recurring_flows` in stage 3 when it grew to cover inflows too)*
       groups outflows by `(merchant_name, amount)`, requires >= 3 occurrences, and classifies the
       average gap between charges into a weekly/monthly/quarterly/yearly cadence bucket, dropping
       groups whose gaps are irregular (stddev > `recurring_regularity_threshold` of the average).

@@ -3,6 +3,7 @@
 import shutil
 import warnings
 
+import duckdb
 import pytest
 from typer.testing import CliRunner
 
@@ -102,9 +103,52 @@ def _build_transformed_warehouse(tmp_path) -> None:
     assert transform.exit_code == 0, transform.output
 
 
+@pytest.fixture(scope="session")
+def _prebuilt_warehouse(tmp_path_factory):
+    """Build the warehouse ONCE per session, for `built_warehouse` to clone.
+
+    Every API test needs the same read-only warehouse, and building it costs
+    ~20s (init-db + synth + three ingests + a full dbt build). Doing that
+    per test made this file's fixtures 203 of its 207 seconds, against under
+    three seconds of actual assertions.
+    """
+    root = tmp_path_factory.mktemp("api-warehouse")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(root / "warehouse.duckdb"))
+    monkeypatch.setenv("DATA_BRONZE_PATH", str(root / "bronze"))
+    monkeypatch.setenv("CONFIG_DIR", str(root / "config"))
+    shutil.copytree("config/examples", root / "config")
+    get_settings.cache_clear()
+    try:
+        _build_transformed_warehouse(root)
+        # Fold the write-ahead log into the database file. Closing a DuckDB
+        # connection does NOT guarantee this, so the dbt subprocess leaves
+        # every silver view and gold table sitting in warehouse.duckdb.wal —
+        # and a copy of the .duckdb file alone silently arrives with only the
+        # app tables, which surfaces as a baffling 503 from every endpoint.
+        with duckdb.connect(str(root / "warehouse.duckdb")) as conn:
+            conn.execute("CHECKPOINT")
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+    return root / "warehouse.duckdb"
+
+
 @pytest.fixture
-def built_warehouse(tmp_path):
-    _build_transformed_warehouse(tmp_path)
+def built_warehouse(_prebuilt_warehouse, tmp_path):
+    """A private copy of the session warehouse, at this test's own path.
+
+    Copied rather than shared so a test that writes (labelling from the review
+    queue) cannot change what a later test reads — full isolation for the price
+    of a file copy instead of a rebuild.
+
+    The silver models are dbt *views* whose SQL has the session bronze path
+    baked in at compile time, so the copy keeps resolving against the session
+    fixture's bronze directory. That is why `_prebuilt_warehouse` owns its own
+    directory rather than building into a per-test one that would vanish.
+    """
+    shutil.copy(_prebuilt_warehouse, tmp_path / "warehouse.duckdb")
+    get_settings.cache_clear()
     return tmp_path
 
 
@@ -158,6 +202,23 @@ class TestBudgets:
         assert names <= {"Groceries", "Dining out", "Streaming"}
         for row in rows:
             assert row["actual_outflow"] > 0
+
+
+class TestCallouts:
+    def test_returns_503_before_transform(self, client):
+        response = client.get("/callouts")
+        assert response.status_code == 503
+        assert "pf transform" in response.json()["detail"]
+
+    def test_admits_when_no_forecast_has_run(self, built_warehouse, client):
+        """The two-month fixture has no forecasts and too little history for an
+        anomaly, so the feed is empty — but it must say *why* the trend half is
+        missing rather than let the dashboard imply an all-clear."""
+        response = client.get("/callouts")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["forecasts_available"] is False
+        assert body["callouts"] == []
 
 
 class TestReviewQueue:
