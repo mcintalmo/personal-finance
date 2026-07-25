@@ -20,8 +20,9 @@ takes effect immediately.
 
 from typing import TYPE_CHECKING
 
-from personal_finance.models import MerchantAlias, Rule
+from personal_finance.models import Budget, MerchantAlias, Rule
 from personal_finance.user_config import (
+    BudgetConfig,
     MerchantAliasConfig,
     RuleConfig,
     TaxonomyNode,
@@ -130,4 +131,42 @@ def seed_merchant_aliases(
     ]
     for alias in seeded:
         conn.execute(_INSERT_MERCHANT_ALIAS, alias.model_dump())
+    return seeded
+
+
+_INSERT_BUDGET = """
+INSERT INTO budgets (id, created_at, name, category_id, period, amount, starts_on, note)
+VALUES ($id, $created_at, $name, $category_id, $period, $amount, $starts_on, $note)
+"""
+
+
+def seed_budgets(conn: duckdb.DuckDBPyConnection, budgets: list[BudgetConfig]) -> list[Budget]:
+    """Replace the ``budgets`` table with the current ``budgets.yaml`` config.
+
+    Same full-replace contract as :func:`seed_rules`/:func:`seed_merchant_aliases`:
+    nothing else references a budget's id and no UI yet edits a budget's
+    ``note`` in place, so re-seeding fully replaces the table.
+
+    Args:
+        conn: An open DuckDB connection with the core schema created.
+        budgets: The budget list, e.g. ``load_user_config().budgets`` —
+            already validated (existing category path) by
+            :class:`~personal_finance.user_config.BudgetConfig`.
+
+    Returns:
+        The seeded budgets.
+    """
+    conn.execute("DELETE FROM budgets")
+    seeded = [
+        Budget(
+            name=budget.name,
+            category_id=category_id_for_path(budget.category),
+            period=budget.period,
+            amount=budget.amount,
+            starts_on=budget.starts_on,
+        )
+        for budget in budgets
+    ]
+    for budget in seeded:
+        conn.execute(_INSERT_BUDGET, budget.model_dump())
     return seeded

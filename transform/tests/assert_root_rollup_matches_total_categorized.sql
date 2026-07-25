@@ -1,8 +1,10 @@
--- Every categorized, non-transfer transaction belongs to exactly one leaf
--- category, which rolls up into exactly one root (roots partition the
--- taxonomy) — so summing every root category's transaction_count must equal
--- the total categorized, non-transfer transaction count. Fails (returns a
--- row) if the rollup logic double-counts or drops a transaction anywhere.
+-- Every categorized line item (gold_line_items — a split when its parent
+-- transaction was decomposed, else the whole transaction) belongs to
+-- exactly one leaf category, which rolls up into exactly one root (roots
+-- partition the taxonomy) — so summing every root category's
+-- transaction_count must equal the total categorized line item count. Fails
+-- (returns a row) if the rollup logic double-counts or drops a line item
+-- anywhere.
 --
 -- root_total is coalesced to -1 (not 0) rather than left null: a taxonomy
 -- with no root category at all is itself the failure this test should catch,
@@ -11,9 +13,8 @@
 
 with totals as (
     select count(*) as categorized_count
-    from {{ ref('silver_transaction_categories_all') }} as a
-    inner join {{ ref('silver_transactions') }} as t using (transaction_id)
-    where not t.is_transfer
+    from {{ ref('gold_line_items') }}
+    where category_id is not null
 ),
 
 root_sum as (

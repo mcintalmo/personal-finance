@@ -34,9 +34,9 @@ models:
   - name: gold_category_rollups
     description: >-
       One row per taxonomy category (every level), aggregating every
-      categorized, non-transfer transaction assigned to that category or any
-      descendant. Every category has a row, zeroed out if nothing rolled up
-      to it.
+      categorized, non-transfer line item (gold_line_items) assigned to that
+      category or any descendant. Every category has a row, zeroed out if
+      nothing rolled up to it.
     columns:
       - name: category_id
         data_tests:
@@ -46,13 +46,97 @@ models:
               arguments:
                 to: ref('silver_categories')
                 field: id
+      - name: parent_id
+        description: NULL for a root category — ready for a Plotly sunburst's ids/parents/values shape.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
       - name: path
         data_tests: [unique, not_null]
       - name: transaction_count
+        description: Count of line items rolled up (a split counts on its own, not its parent transaction).
         data_tests: [not_null]
       - name: total_outflow
         data_tests: [not_null]
       - name: total_inflow
         data_tests: [not_null]
       - name: net_amount
+        data_tests: [not_null]
+
+  - name: gold_line_items
+    description: >-
+      One row per real spend/income event at the finest granularity
+      available — a split (product_name) when a transaction was decomposed
+      by the Amazon cascade, else the whole transaction. category_id is NULL
+      until some cascade stage categorizes it.
+    columns:
+      - name: line_item_id
+        data_tests: [unique, not_null]
+      - name: transaction_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_transactions')
+                field: transaction_id
+      - name: amount
+        data_tests: [not_null]
+      - name: posted_on
+        data_tests: [not_null]
+
+  - name: gold_monthly_flow
+    description: >-
+      Net cash flow by calendar month across every non-transfer transaction.
+      Powers the Phase 6 overview dashboard's spend-over-time chart.
+    columns:
+      - name: month
+        data_tests: [unique, not_null]
+      - name: total_outflow
+        data_tests: [not_null]
+      - name: total_inflow
+        data_tests: [not_null]
+      - name: net_amount
+        data_tests: [not_null]
+      - name: transaction_count
+        data_tests: [not_null]
+
+  - name: gold_budget_actuals
+    description: >-
+      Budget vs. actual: one row per (budget, period bucket), aggregating
+      real outflow across the budget's whole category subtree at the
+      budget's own cadence (weekly/monthly/quarterly/yearly).
+    columns:
+      - name: budget_id
+        data_tests: [not_null]
+      - name: category_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_categories')
+                field: id
+      - name: period_start
+        data_tests: [not_null]
+      - name: budgeted_amount
+        data_tests: [not_null]
+      - name: actual_outflow
+        data_tests: [not_null]
+
+  - name: gold_sankey_flow
+    description: >-
+      Money-flow edges (source, target, value) for the Phase 6 Sankey
+      diagram: income -> account, and account -> top-level category subtree.
+    columns:
+      - name: stage
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["income", "spend"]
+      - name: source_node
+        data_tests: [not_null]
+      - name: target_node
+        data_tests: [not_null]
+      - name: value
         data_tests: [not_null]

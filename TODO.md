@@ -5,7 +5,7 @@
 > before picking up a task. Mark a task in progress before starting, done (`[x]`) when
 > `/run-checks` is green.
 
-## Phase 5 — Line items (order history)
+## Phase 6 — Serving
 
 > Phase 1 (Foundation) complete — demo verified 2026-07-12.
 > Phase 2 (Ingestion) complete — demo verified 2026-07-18: `pf synth` → fixtures,
@@ -21,16 +21,23 @@
 > the full four-stage cascade (rules → embedding similarity → local-LLM fallback → human review) →
 > "spend on apples this year" queryable end-to-end, with a human override changing a spend rollup
 > live (Costco/photo receipts deferred to Phase 9).
+> Phase 6 (Serving) complete — demo verified 2026-07-25: `pf serve` (FastAPI over the gold marts)
+> + `pf dashboard` (Streamlit + Plotly) — drilled from total spend down to individual Amazon line
+> items on a live sunburst, watched income flow into accounts and out to top-level categories on a
+> Sankey, edited `budgets.yaml` from the Config page and watched the change land in the Budgets
+> page's actual-vs-budgeted chart, and approved a categorization from the Review Queue page.
 
 Costco has no order-history export (confirmed against docs/source-schemas.md — in-app digital
-receipts only), so Phase 5 targets Amazon only for now; Costco (and other photo/PDF-only
-receipts) stays in Phase 9 until vision-LLM parsing exists.
+receipts only), so Phase 5 targeted Amazon only; Costco (and other photo/PDF-only receipts) stays
+in Phase 9 until vision-LLM parsing exists.
 
-- [x] Amazon order-history CSV ingestion: see Done below.
-- [x] Amazon order ↔ card-charge matching: see Done below.
-- [x] Transaction decomposition into splits, keyed off matched order line items: see Done below.
-- [x] Line-item categorization through the full cascade (rules, embedding similarity, local-LLM
-      fallback, human review) — enables "spend on apples this year": see Done below.
+- [x] FastAPI API layer over gold marts: see Done below.
+- [x] Streamlit app shell: overview dashboard (net flow, spend over time, top movers): see Done below.
+- [x] Sunburst drill-down of the category hierarchy: see Done below.
+- [x] Sankey of money flow (income → accounts → category subtrees): see Done below.
+- [x] Budget buckets: define in YAML, budget vs. actual views: see Done below.
+- [x] Review-queue UI (approve/correct categorizations): see Done below.
+- [x] Config editing from within the app: see Done below.
 
 ## Backlog (later phases)
 
@@ -56,6 +63,41 @@ one phase at a time when the previous phase's demo is complete.
 
 ## Done
 
+- [x] Phase 6 — Serving: `personal_finance.api` (FastAPI) over the gold marts, and
+      `personal_finance.webapp` (Streamlit + Plotly), wired together by two new CLI commands
+      (`pf serve`, `pf dashboard`). New gold models close a real gap the Phase 5 backlog had
+      flagged ("the implicit-split union view is a gold-layer concern, not built yet"):
+      `gold_line_items` unions each Amazon-decomposed transaction's splits (not the transaction
+      itself) with every other transaction as its own single line item, so "spend on apples"
+      rolls up through the same mechanism as every other category instead of a one-off query.
+      `gold_category_rollups` now sources from `gold_line_items` (gained `parent_id`, ready for a
+      Plotly sunburst's ids/parents/values shape) instead of joining transactions directly —
+      verified backward-compatible: all pre-existing rollup tests pass unchanged against fixtures
+      with no Amazon data. New `gold_monthly_flow` (net flow/spend-over-time), `gold_sankey_flow`
+      (income → account → top-level category edges), and `gold_budget_actuals` (budget vs. actual,
+      bucketed by each budget's own cadence via `date_trunc`). Budgets are now actually seeded:
+      new `personal_finance.seed.seed_budgets` (`pf init-db`), `BudgetConfig` gained an optional
+      `starts_on` (defaults to 2000-01-01 — "always active" — so existing `budgets.yaml` files
+      don't need updating). New `personal_finance.user_config.read_config_file`/`write_config_file`
+      power the Config page's editor — a write re-validates the **whole** configuration
+      (cross-file referential integrity, not just the edited file's own schema) before touching
+      disk. FastAPI endpoints reuse existing modules end to end (`personal_finance.review`,
+      `personal_finance.llm_categorize.fetch_category_paths`) rather than duplicating logic — the
+      API is a thin projection over gold/silver dbt models plus the CLI's own backend functions.
+      **Live-verified end-to-end**: ran `pf serve` and `pf dashboard` against a real 6-month synth
+      warehouse (chase_checking/amex/venmo/wells_fargo/bofa_checking/capital_one/citi + Amazon,
+      210/210 dbt checks green) — drilled the sunburst from `essentials` down to `apples`
+      ($32.03), watched the Sankey show real per-account income and essentials/non-essentials
+      spend, edited `budgets.yaml` from the Config page and confirmed the write round-tripped and
+      re-validated referential integrity (a bad category path is rejected, nothing is written),
+      and exercised the Review Queue page's label flow against real uncategorized splits. Caught
+      and fixed a real bug this way: `GET /review/queue` 500'd on a Venmo transfer leg with a NULL
+      `description_raw` (no `not_null` dbt test on that column) — `TransactionReviewItem` had it
+      typed as required `str`; fixed to `str | None`, pinned with a regression test. Every
+      Streamlit page also smoke-tested exception-free via `streamlit.testing.v1.AppTest` against
+      the live API. `src/personal_finance/api.py`, `src/personal_finance/webapp/`,
+      `transform/models/gold/gold_line_items.sql`, `gold_monthly_flow.sql`, `gold_sankey_flow.sql`,
+      `gold_budget_actuals.sql` (2026-07-25).
 - [x] Amazon order-history CSV ingestion (Phase 5): lands Retail.OrderHistory.1.csv
       (Privacy Central export) into its own `bronze_amazon` dataset — not `bronze/`, which the
       transactions source's `bronze/*/*.parquet` wildcard would otherwise also sweep up and

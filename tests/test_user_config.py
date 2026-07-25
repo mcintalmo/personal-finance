@@ -14,8 +14,11 @@ from personal_finance.user_config import (
     SourceKind,
     TaxonomyNode,
     UserConfig,
+    config_file_names,
     load_user_config,
+    read_config_file,
     taxonomy_to_categories,
+    write_config_file,
 )
 
 EXAMPLES_CONFIG_DIR = Path(__file__).parent.parent / "config" / "examples"
@@ -239,3 +242,45 @@ class TestTaxonomyToCategories:
         assert all(
             isinstance(budget.amount, Decimal) and budget.amount > 0 for budget in config.budgets
         )
+
+
+class TestConfigFileEditing:
+    """Phase 6's config-editing API reads/writes single files through these
+    helpers rather than the whole-directory load_user_config."""
+
+    def test_config_file_names_matches_load_user_config_keys(self):
+        names = config_file_names()
+        assert names["rules"] == "rules.yaml"
+        assert names["taxonomy"] == "taxonomy.yaml"
+        assert names["budgets"] == "budgets.yaml"
+
+    def test_read_missing_file_is_empty_string(self, tmp_path):
+        assert read_config_file("rules", tmp_path) == ""
+
+    def test_write_then_read_round_trips(self, tmp_path):
+        write_config(tmp_path, taxonomy=MINIMAL_TAXONOMY)
+        content = "- pattern: '(?i)netflix'\n  category: essentials/groceries\n"
+        write_config_file("rules", content, tmp_path)
+        assert read_config_file("rules", tmp_path) == content
+        assert (tmp_path / "rules.yaml").read_text(encoding="utf-8") == content
+
+    def test_invalid_yaml_raises_and_does_not_write(self, tmp_path):
+        with pytest.raises(ConfigurationError, match="invalid YAML"):
+            write_config_file("rules", "not: [valid", tmp_path)
+        assert not (tmp_path / "rules.yaml").exists()
+
+    def test_referential_integrity_violation_raises_and_does_not_write(self, tmp_path):
+        write_config(tmp_path, taxonomy=MINIMAL_TAXONOMY)
+        bad = "- pattern: '(?i)netflix'\n  category: no/such/category\n"
+        with pytest.raises(ConfigurationError):
+            write_config_file("rules", bad, tmp_path)
+        assert not (tmp_path / "rules.yaml").exists()
+
+    def test_valid_write_is_visible_to_load_user_config(self, tmp_path):
+        write_config(tmp_path, taxonomy=MINIMAL_TAXONOMY)
+        write_config_file(
+            "rules", "- pattern: '(?i)netflix'\n  category: essentials/groceries\n", tmp_path
+        )
+        config = load_user_config(tmp_path)
+        assert len(config.rules) == 1
+        assert config.rules[0].category == "essentials/groceries"

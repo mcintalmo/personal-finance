@@ -1,11 +1,16 @@
 """Tests for personal_finance.seed."""
 
+from datetime import date
+from decimal import Decimal
+
 import duckdb
 import pytest
 
 from personal_finance.ddl import create_schema
-from personal_finance.seed import seed_categories, seed_merchant_aliases, seed_rules
+from personal_finance.models import BudgetPeriod
+from personal_finance.seed import seed_budgets, seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.user_config import (
+    BudgetConfig,
     MerchantAliasConfig,
     RuleConfig,
     TaxonomyNode,
@@ -119,6 +124,70 @@ MERCHANT_ALIASES = [
 
 def count_merchant_aliases(conn):
     return conn.execute("SELECT count(*) FROM merchant_aliases").fetchone()[0]
+
+
+BUDGETS = [
+    BudgetConfig(
+        name="Groceries", category="essentials/groceries", period=BudgetPeriod.MONTHLY, amount=500
+    ),
+    BudgetConfig(
+        name="Since Q1",
+        category="income",
+        period=BudgetPeriod.YEARLY,
+        amount=1000,
+        starts_on=date(2026, 1, 1),
+    ),
+]
+
+
+def count_budgets(conn):
+    return conn.execute("SELECT count(*) FROM budgets").fetchone()[0]
+
+
+class TestSeedBudgets:
+    def test_seeds_all_budgets(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seeded = seed_budgets(conn, BUDGETS)
+        assert count_budgets(conn) == 2
+        assert [b.name for b in seeded] == ["Groceries", "Since Q1"]
+
+    def test_category_id_resolved_from_path(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seeded = seed_budgets(conn, BUDGETS)
+        assert seeded[0].category_id == category_id_for_path("essentials/groceries")
+        assert seeded[1].category_id == category_id_for_path("income")
+
+    def test_amount_and_period_round_trip(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seed_budgets(conn, BUDGETS)
+        amount, period = conn.execute(
+            "SELECT amount, period FROM budgets WHERE name = 'Groceries'"
+        ).fetchone()
+        assert amount == Decimal("500.00")
+        assert period == "monthly"
+
+    def test_starts_on_defaults_to_always_active(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seed_budgets(conn, BUDGETS)
+        (starts_on,) = conn.execute(
+            "SELECT starts_on FROM budgets WHERE name = 'Groceries'"
+        ).fetchone()
+        assert starts_on == date(2000, 1, 1)
+
+    def test_starts_on_override_is_respected(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seed_budgets(conn, BUDGETS)
+        (starts_on,) = conn.execute(
+            "SELECT starts_on FROM budgets WHERE name = 'Since Q1'"
+        ).fetchone()
+        assert starts_on == date(2026, 1, 1)
+
+    def test_reseeding_fully_replaces(self, conn):
+        seed_categories(conn, TAXONOMY)
+        seed_budgets(conn, BUDGETS)
+        reseeded = seed_budgets(conn, [BUDGETS[1]])
+        assert count_budgets(conn) == 1
+        assert reseeded[0].name == "Since Q1"
 
 
 class TestSeedRules:
