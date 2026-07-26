@@ -47,7 +47,8 @@
 - [ ] Config editing from within the app
 
 ## 7. Intelligence
-- [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
+- [ ] NL chat agent (Pydantic AI over Ollama, tools via the MCP server, streamed to the UI over AG-UI)
+- [x] MCP tool server (`pf mcp`): governed read-only tools + `run_sql` over the warehouse, for any agent
 - [ ] Recurring-flow detection, inflow and outflow (heuristic dbt model: merchant + amount + cadence)
 - [ ] Forecasting of spend/income (statsmodels: Theta/ETS over a committed+variable decomposition)
 - [ ] Trend and anomaly callouts on the dashboard (modified z-score anomalies, forecast trends, budget risk)

@@ -11,6 +11,7 @@ dependencies = [
     "dlt[parquet]>=1.28.1",
     "duckdb>=1.5.4",
     "fastapi>=0.139.2",
+    "fastmcp>=3.4.4",
     "httpx>=0.28.1",
     "ofxtools>=1.1.1",
     "plotly>=6.9.0",

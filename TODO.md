@@ -32,7 +32,7 @@ receipts only), so Phase 5 targeted Amazon only; Costco (and other photo/PDF-onl
 in Phase 9 until vision-LLM parsing exists.
 
 - [x] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence): see Done below.
-- [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries)
+- [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries) — MCP tool server done, see Done below
 - [x] Forecasting of spend/income (statsmodels): see Done below.
 - [x] Trend and anomaly callouts on the dashboard: see Done below.
 
@@ -76,6 +76,47 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stage 5 — `pf mcp`: a governed MCP tool server over the warehouse. Stage A of the
+      agent plan: expose the data as tools first, so the agent (and Claude Desktop, and a future
+      React/Dash frontend) all plug into one governed surface rather than each growing its own.
+
+      **Sibling of `api.py`, not a layer on it.** Both are thin adapters over the same library
+      modules. Deliberately NOT `FastMCP.from_fastapi(app)` despite it being a one-liner: that
+      produces tools shaped like HTTP routes rather than like questions, and — more seriously —
+      would expose `PUT /config/{name}`, handing an agent the ability to rewrite the user's YAML.
+
+      Twelve tools: schema discovery (`list_tables`, `describe_table`, also published as MCP
+      resources), nine curated marts tools, and `run_sql` for open-ended analysis. The curated
+      tools alone would have made an agent that can only read the same tables the dashboard
+      already shows; `run_sql` is what makes real analysis possible.
+
+      **The read-only guarantee is enforced by DuckDB, not by inspecting the model's SQL** — there
+      is no keyword blocklist to talk past. Three settings, each verified by attacking it:
+      `read_only=True` (INSERT/UPDATE/DROP/CREATE/ATTACH all refused at the engine);
+      `enable_external_access=false`, because a read-only connection will otherwise happily
+      `read_csv('/etc/passwd')` straight into the model's context, and DuckDB refuses every
+      attempt to switch it back on (`SET`, `SET GLOBAL`, `PRAGMA`, `RESET`); and
+      `allowed_directories` scoped to the bronze landing zone.
+      **That last one came out of a real bug the mart-level tests caught.** The silver layer is
+      dbt *views over bronze Parquet*, so banning external access outright made every
+      transaction-level query fail with a permission error — the guard looked like it worked
+      while silently removing half the warehouse. A synthetic all-tables fixture cannot catch
+      that, which is exactly why the tool SQL is also exercised against a real dbt-built
+      warehouse. The allowlist cannot be widened from SQL, and `COPY ... TO` stays refused, so it
+      is not a hole.
+      `run_sql` is additionally bounded by a row cap (reported via a `truncated` flag rather than
+      silently) and a timeout implemented by interrupting the connection from a timer thread — a
+      cartesian join costs a model nothing to write and would otherwise hang the chat forever.
+
+      Also fixed a confusing failure mode: DuckDB refuses a read-only connection while the same
+      *process* holds a read-write one (dbt-duckdb keeps its connection open after a build), and
+      its own error message does not hint at why. Now caught and explained.
+
+      **Prompt injection is a live concern, not a theoretical one** — merchant names come from
+      ingested bank exports and land directly in the model's context. The mitigation is
+      structural rather than textual: there is no write path to reach, so a successful injection
+      buys a wrong answer, not a changed ledger.
 
 - [x] Phase 7 stages 3-4 — Trend/anomaly callouts, and recurring detection extended to inflows.
 

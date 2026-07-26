@@ -36,6 +36,7 @@ def test_help_lists_commands():
         "review",
         "forecast",
         "callouts",
+        "mcp",
     ):
         assert command in result.output
 
@@ -55,6 +56,15 @@ class TestCallouts:
         result = runner.invoke(app, ["callouts"])
         assert result.exit_code == 1
         assert "pf transform" in result.output
+
+
+class TestMcp:
+    def test_exits_cleanly_without_a_warehouse(self):
+        """A desktop MCP host launches this as a subprocess; exiting with a
+        clear message beats connecting fine and then failing every tool."""
+        result = runner.invoke(app, ["mcp"])
+        assert result.exit_code == 1
+        assert "pf init-db" in result.output
 
 
 class TestSynth:

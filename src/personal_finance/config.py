@@ -67,6 +67,21 @@ class ServingSettings(BaseModel):
     api_url: str = "http://127.0.0.1:8000"
 
 
+class McpSettings(BaseModel):
+    """MCP tool-server settings (``settings.mcp.*``).
+
+    Bounds on what an agent can pull back in one call. These are context
+    limits as much as safety limits: a model that asks for every transaction
+    gets a truncation notice rather than tens of thousands of rows it cannot
+    reason over anyway.
+    """
+
+    max_rows: int = 500
+    query_timeout_seconds: float = 30.0
+    http_host: str = "127.0.0.1"
+    http_port: int = 8001
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -90,6 +105,9 @@ class Settings(BaseSettings):
 
     # ── Serving (FastAPI + Streamlit) ──────────────────────
     serving: ServingSettings = Field(default_factory=ServingSettings)
+
+    # ── MCP tool server (agents) ───────────────────────────
+    mcp: McpSettings = Field(default_factory=McpSettings)
 
     # ── Paths ─────────────────────────────────────────────
     config_dir: Path = Path("config")  # user-editable YAML config (see user_config.py)
