@@ -138,10 +138,10 @@ def built_warehouse(_prebuilt_warehouse, tmp_path):
     queue) cannot change what a later test reads — full isolation for the price
     of a file copy instead of a rebuild.
 
-    The silver models are dbt *views* whose SQL has the session bronze path
-    baked in at compile time, so the copy keeps resolving against the session
-    fixture's bronze directory. That is why `_prebuilt_warehouse` owns its own
-    directory rather than building into a per-test one that would vanish.
+    Self-contained now that the silver layer is materialized as tables
+    (transform/dbt_project.yml) — the copy carries all its own data and does
+    not read the fixture's bronze directory. `_prebuilt_warehouse` still owns
+    its own directory so the build has somewhere stable to land.
     """
     shutil.copy(_prebuilt_warehouse, tmp_path / "warehouse.duckdb")
     get_settings.cache_clear()

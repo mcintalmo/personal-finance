@@ -113,6 +113,37 @@ Phase 6 demo):
       *process* holds a read-write one (dbt-duckdb keeps its connection open after a build), and
       its own error message does not hint at why. Now caught and explained.
 
+      **A pre-merge review found a real hole in that guarantee, and it was the central claim of
+      the PR.** `allowed_directories` confers WRITE as well as read, and DuckDB has no read-only
+      variant (`allowed_paths` blocks writes but also blocks the directory listing a glob needs,
+      so it cannot serve the views). So `COPY ... TO '<bronze>/x.parquet'` succeeded through
+      `run_sql` — and because the silver views glob that directory, the injected rows appeared on
+      the very next query with no `pf transform`. Reproduced end to end: a mismatched schema
+      instead throws a permanent ConversionException that breaks every transaction-level query
+      until the file is deleted by hand. The docstring's claim that "COPY ... TO stays refused"
+      was simply false.
+      A first fix scoped the allowlist per connection — granted to our SQL, withheld from the
+      model's. **A second review finding killed that too:** `allowed_directories` and
+      `enable_external_access` are **GLOBAL to the shared DuckDB instance**, not per connection,
+      so the grant leaked to any connection open at the same moment (verified: the write
+      succeeded again), and the reverse interleaving crashed with `Cannot change
+      allowed_directories when enable_external_access is disabled`. MCP hosts call tools in
+      parallel, so this was not hypothetical.
+      **The real fix was to remove the need for the grant: silver is now materialized as tables**
+      (`transform/dbt_project.yml`, `+materialized: table`). Nothing in the warehouse reads from
+      disk, so every connection runs with no filesystem access at all — no allowlist to leak, no
+      GLOBAL-setting conflict, and, as a bonus, `run_sql` reaches the *whole* warehouse including
+      silver rather than gold-only. Measured cost: warehouse 6.5 MB -> 11 MB on 18 months of
+      synth data. Strictly better on every axis than the design it replaced.
+      The same review found the toggle test was **vacuous** (DuckDB refuses to change
+      `enable_external_access` on a running database regardless of our config, so it passed with
+      every guard removed — it now asserts a follow-up read still fails), the ATTACH test
+      attached a *nonexistent* database (so it failed on IO, not on the guard), and `run_sql`
+      **silently dropped duplicate column names** — `SELECT a.*, b.*` returned half the columns
+      with `row_count` unaffected, which is exactly the shape of wrongness that reads as data.
+      Curated tools now return the same `{row_count, truncated, rows}` envelope as `run_sql`
+      rather than a bare list, so a capped page can no longer read as a complete answer.
+
       **Prompt injection is a live concern, not a theoretical one** — merchant names come from
       ingested bank exports and land directly in the model's context. The mitigation is
       structural rather than textual: there is no write path to reach, so a successful injection

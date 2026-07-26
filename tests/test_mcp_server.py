@@ -16,6 +16,7 @@ mart schemas in test_dbt.py, where a built warehouse already exists.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import duckdb
@@ -47,10 +48,6 @@ def warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         conn.execute("CREATE SCHEMA main_gold")
         conn.execute("CREATE SCHEMA main_silver")
         conn.execute(
-            "CREATE VIEW main_silver.silver_transactions AS "
-            f"SELECT * FROM read_parquet('{bronze}/*.parquet')"
-        )
-        conn.execute(
             "CREATE TABLE main_gold.gold_monthly_flow AS SELECT * FROM (VALUES "
             "(DATE '2026-01-01', 5000.00, 3000.00, 2000.00, 42),"
             "(DATE '2026-02-01', 5000.00, 3500.00, 1500.00, 47)"
@@ -60,6 +57,29 @@ def warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "CREATE TABLE main_silver.silver_merchants AS SELECT * FROM (VALUES "
             "('COSTCO', 12, 1400.00), ('NETFLIX', 6, 92.94)"
             ") AS t(merchant_name, transaction_count, total_outflow)"
+        )
+        # A SPLIT transaction: one $120 Amazon order decomposed into three
+        # line items. Joining line items naively fans this into three rows,
+        # each repeating the full $120.
+        conn.execute(
+            "CREATE TABLE main_silver.silver_transactions AS SELECT * FROM (VALUES "
+            "('txn-1', DATE '2026-02-10', 'AMAZON', -120.00, 'outflow', false),"
+            "('txn-2', DATE '2026-02-11', 'CAFE', -5.00, 'outflow', false)"
+            ") AS t(transaction_id, posted_on, merchant_name, amount, flow, is_transfer)"
+        )
+        conn.execute(
+            "CREATE TABLE main_gold.gold_line_items AS SELECT * FROM (VALUES "
+            "('li-1','txn-1',-60.00, DATE '2026-02-10','cat-a'),"
+            "('li-2','txn-1',-40.00, DATE '2026-02-10','cat-b'),"
+            "('li-3','txn-1',-20.00, DATE '2026-02-10','cat-c'),"
+            "('li-4','txn-2', -5.00, DATE '2026-02-11','cat-a')"
+            ") AS t(line_item_id, transaction_id, amount, posted_on, category_id)"
+        )
+        conn.execute(
+            "CREATE TABLE main_gold.gold_category_paths AS SELECT * FROM (VALUES "
+            "('cat-a','essentials/groceries',2),('cat-b','essentials/household',2),"
+            "('cat-c','lifestyle/books',2)"
+            ") AS t(id, path, depth)"
         )
         conn.execute("CHECKPOINT")
     monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(path))
@@ -142,38 +162,58 @@ class TestReadOnlyGuarantee:
     def test_the_file_access_guard_cannot_be_switched_back_on(
         self, warehouse: Path, statement: str
     ) -> None:
-        """The guard is one-way. Without this property a model could simply
-        re-enable external access in one query and read files in the next."""
-        with pytest.raises(ToolError, match="Query failed"):
+        """The guard is one-way: a model must not be able to re-enable access
+        in one query and read files in the next.
+
+        Asserting only that the toggle raises would be vacuous — DuckDB
+        refuses to change this setting on a running database regardless of
+        our configuration, so that assertion passes even with every guard
+        removed. What matters is the follow-up read, which is what actually
+        pins OUR setting rather than a DuckDB built-in.
+        """
+        with contextlib.suppress(ToolError):
             call("run_sql", query=statement)
+        with pytest.raises(ToolError, match="Query failed"):
+            call("run_sql", query="SELECT * FROM read_csv('/etc/hosts')")
 
     def test_attaching_another_database_is_refused(self, warehouse: Path, tmp_path: Path) -> None:
-        """ATTACH would otherwise be a way to reach a writable database."""
+        """ATTACH would otherwise be a way to reach a writable database.
+
+        Uses a database that EXISTS: attaching a missing path fails with an IO
+        error whichever guards are in place, which would pin nothing.
+        """
+        side = tmp_path / "side.duckdb"
+        with duckdb.connect(str(side)) as conn:
+            conn.execute("CREATE TABLE t(a INT)")
         with pytest.raises(ToolError, match="Query failed"):
-            call("run_sql", query=f"ATTACH '{tmp_path / 'side.duckdb'}' AS side")
+            call("run_sql", query=f"ATTACH '{side}' AS side")
 
     def test_ordinary_reads_still_work(self, warehouse: Path) -> None:
         """The guards must not have been bought by breaking the feature."""
         result = call("run_sql", query="SELECT count(*) AS n FROM main_gold.gold_monthly_flow")
         assert result["rows"] == [{"n": 2}]
 
-    def test_parquet_backed_views_are_still_readable(self, warehouse: Path) -> None:
-        """The regression that a blanket external-access ban causes.
+    def test_the_whole_warehouse_stays_queryable_without_any_allowlist(
+        self, warehouse: Path
+    ) -> None:
+        """The payoff of materializing silver.
 
-        The silver layer is dbt views over bronze Parquet, so disabling
-        external access outright makes every transaction-level query fail with
-        a permission error — the guard looks like it works while silently
-        removing half the warehouse. `allowed_directories` re-permits the
-        bronze landing zone specifically. Found by running the tools against a
-        real dbt-built warehouse; a synthetic all-tables fixture cannot catch
-        it, which is why this fixture has a Parquet-backed view.
+        With the silver layer as tables, nothing in the warehouse reads from
+        disk, so the connection needs no directory allowlist at all — and
+        `run_sql` reaches silver as well as gold. The earlier design had to
+        allow-list bronze for the views, which turned out to BE the write path
+        (see the module docstring).
         """
-        result = call("run_sql", query="SELECT * FROM main_silver.silver_transactions")
-        assert result["rows"] == [{"merchant_name": "COSTCO", "amount": -42.0}]
+        assert call("run_sql", query="SELECT count(*) AS n FROM main_silver.silver_transactions")[
+            "rows"
+        ] == [{"n": 2}]
+        assert call("run_sql", query="SELECT count(*) AS n FROM main_gold.gold_monthly_flow")[
+            "rows"
+        ] == [{"n": 2}]
 
-    def test_the_bronze_allowlist_cannot_be_widened(self, warehouse: Path) -> None:
-        """Allow-listing bronze must not become a general escape hatch."""
-        with pytest.raises(ToolError, match="Query failed"):
+    def test_no_directory_can_be_allow_listed_at_all(self, warehouse: Path) -> None:
+        """There is no allowlist to widen, and none can be added."""
+        with contextlib.suppress(ToolError):
             call("run_sql", query="SET allowed_directories=['/']")
         with pytest.raises(ToolError, match="Query failed"):
             call("run_sql", query="SELECT * FROM read_csv('/etc/hosts')")
@@ -187,6 +227,74 @@ class TestReadOnlyGuarantee:
                 query=f"COPY (SELECT * FROM main_gold.gold_monthly_flow) TO '{tmp_path / 'leak.csv'}'",
             )
         assert not (tmp_path / "leak.csv").exists()
+
+    def test_data_cannot_be_written_into_the_bronze_landing_zone(self, warehouse: Path) -> None:
+        """The finding that reshaped this module.
+
+        The first design allow-listed bronze so the silver *views* could
+        resolve. `allowed_directories` confers WRITE as well as read and has no
+        read-only variant, so a COPY into that directory was a live
+        ledger-injection path — the views globbed it, so forged rows appeared
+        on the next query with no `pf transform`. Scoping the grant per
+        connection did not help either: both settings are GLOBAL to the shared
+        DuckDB instance, so the grant leaked to any connection open at the same
+        time. Silver is materialized now and no directory is ever allow-listed,
+        which is what makes this assertion hold unconditionally.
+        """
+        bronze = warehouse.parent / "bronze"
+        before = set(bronze.iterdir())
+        with pytest.raises(ToolError, match="Query failed"):
+            call(
+                "run_sql",
+                query=(
+                    "COPY (SELECT 'INJECTED' AS merchant_name, -999.00 AS amount) "
+                    f"TO '{bronze / 'injected.parquet'}' (FORMAT parquet)"
+                ),
+            )
+        assert set(bronze.iterdir()) == before, "run_sql wrote a file into the bronze landing zone"
+
+
+class TestConcurrency:
+    """Parallel tool calls, which is how MCP hosts actually behave.
+
+    The previous design scoped the bronze allowlist per connection. That was
+    defeated here and nowhere else: DuckDB's `allowed_directories` and
+    `enable_external_access` are GLOBAL to the shared database instance, so a
+    grant made for one connection leaked to every other connection open at the
+    same moment, and the reverse interleaving crashed with an unhandled
+    `Cannot change allowed_directories when enable_external_access is
+    disabled`. Neither showed up in any single-call test.
+    """
+
+    def test_concurrent_tool_calls_all_succeed(self, warehouse: Path) -> None:
+        async def _run() -> list[Any]:
+            async with Client(build_server()) as client:
+                return await asyncio.gather(
+                    *[
+                        client.call_tool(name, {})
+                        for name in ("monthly_flow", "list_tables", "top_merchants", "monthly_flow")
+                    ]
+                )
+
+        results = asyncio.run(_run())
+        assert len(results) == 4
+        assert all(r.data for r in results)
+
+    def test_a_write_stays_refused_while_other_connections_are_open(self, warehouse: Path) -> None:
+        """The exact leak that broke the previous design: a write attempted
+        while other connections are live must still fail."""
+        bronze = warehouse.parent / "bronze"
+        before = set(bronze.iterdir())
+        with (
+            readonly_connection(),
+            readonly_connection(),
+            pytest.raises(ToolError, match="Query failed"),
+        ):
+            call(
+                "run_sql",
+                query=f"COPY (SELECT 1 x) TO '{bronze / 'leak.parquet'}' (FORMAT parquet)",
+            )
+        assert set(bronze.iterdir()) == before
 
 
 class TestRunSql:
@@ -222,11 +330,45 @@ class TestRunSql:
         self, warehouse: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A cartesian join costs a model nothing to write. Without the
-        timeout the agent waits forever and the user sees a hung chat."""
-        monkeypatch.setenv("MCP_QUERY_TIMEOUT_SECONDS", "0.5")
+        timeout the agent waits forever and the user sees a hung chat.
+
+        2s rather than something tighter: a stale `interrupt()` is silently
+        ignored by DuckDB, so if a loaded machine took longer than the timeout
+        to get from `timer.start()` to `conn.execute()` the interrupt would be
+        consumed and this test would hang indefinitely rather than fail.
+        """
+        monkeypatch.setenv("MCP_QUERY_TIMEOUT_SECONDS", "2")
         get_settings.cache_clear()
         with pytest.raises(ToolError, match="time limit"):
             call("run_sql", query="SELECT count(*) FROM range(1000000000) a, range(100000) b")
+
+    def test_duplicate_column_names_are_not_silently_dropped(self, warehouse: Path) -> None:
+        """`SELECT a.*, b.*` yields repeated names, and building a dict from
+        them straight would drop every repeat — the row still looks
+        well-formed and row_count is unaffected, so a model reasons over half
+        the columns it asked for and never knows. run_sql's own docstring
+        recommends exactly these cross-mart joins."""
+        result = call(
+            "run_sql",
+            query=(
+                "SELECT a.month, b.month FROM main_gold.gold_monthly_flow a, "
+                "main_gold.gold_monthly_flow b LIMIT 1"
+            ),
+        )
+        assert len(result["rows"][0]) == 2, "a column was lost to a name collision"
+        assert set(result["rows"][0]) == {"month", "month_2"}
+
+    @pytest.mark.parametrize("query", ["", "   ", "-- just a comment", ";", "/* block */"])
+    def test_sql_with_no_statement_is_reported_not_crashed(
+        self, warehouse: Path, query: str
+    ) -> None:
+        """DuckDB returns None from execute() for statement-less input, so
+        reading .description raises AttributeError — which bypasses the
+        deliberate hand-the-model-the-real-message path and surfaces as an
+        opaque internal error. A model emitting `-- let me look first` is
+        entirely plausible."""
+        with pytest.raises(ToolError, match="no SQL statement"):
+            call("run_sql", query=query)
 
     def test_a_syntax_error_returns_the_databases_own_message(self, warehouse: Path) -> None:
         """The model wrote the SQL and can fix it, so the parser's message is
@@ -248,7 +390,7 @@ class TestSchemaDiscovery:
     def test_describe_table_returns_columns(self, warehouse: Path) -> None:
         columns = {
             row["column_name"]
-            for row in call("describe_table", qualified_name="main_gold.gold_monthly_flow")
+            for row in call("describe_table", qualified_name="main_gold.gold_monthly_flow")["rows"]
         }
         assert {"month", "total_inflow", "net_amount"} <= columns
 
@@ -263,15 +405,45 @@ class TestSchemaDiscovery:
 
 class TestCuratedTools:
     def test_monthly_flow_returns_every_month_unfiltered(self, warehouse: Path) -> None:
-        assert len(call("monthly_flow")) == 2
+        assert call("monthly_flow")["row_count"] == 2
 
     def test_monthly_flow_bounds_are_inclusive(self, warehouse: Path) -> None:
-        rows = call("monthly_flow", start_month="2026-02-01", end_month="2026-02-01")
-        assert [row["month"] for row in rows] == ["2026-02-01"]
+        result = call("monthly_flow", start_month="2026-02-01", end_month="2026-02-01")
+        assert [row["month"] for row in result["rows"]] == ["2026-02-01"]
 
     def test_top_merchants_is_ordered_by_spend(self, warehouse: Path) -> None:
-        rows = call("top_merchants", limit=5)
-        assert [row["merchant_name"] for row in rows] == ["COSTCO", "NETFLIX"]
+        result = call("top_merchants", limit=5)
+        assert [row["merchant_name"] for row in result["rows"]] == ["COSTCO", "NETFLIX"]
+
+    def test_a_split_transaction_is_not_fanned_out(self, warehouse: Path) -> None:
+        """One $120 order decomposed into three line items must stay ONE row.
+
+        Joining gold_line_items directly returns three rows each repeating the
+        full $120, so a model summing the result over-reports that spend
+        threefold — and `limit` starts counting duplicates, so "the 2 most
+        recent transactions" returns one transaction twice. The tool says it
+        finds *individual transactions*, so the fan-out is silently wrong
+        rather than merely surprising.
+        """
+        rows = call("search_transactions")["rows"]
+        assert len(rows) == 2, "a split transaction was fanned out into multiple rows"
+        amazon = next(r for r in rows if r["merchant_name"] == "AMAZON")
+        assert amazon["amount"] == pytest.approx(-120.0)
+        assert sorted(amazon["category_paths"]) == [
+            "essentials/groceries",
+            "essentials/household",
+            "lifestyle/books",
+        ]
+        assert sum(r["amount"] for r in rows) == pytest.approx(-125.0)  # not -365.00
+
+    def test_search_transactions_category_filter_matches_any_split_line(
+        self, warehouse: Path
+    ) -> None:
+        """Filtering by a category must still find a split order that touches
+        it, and must return the whole transaction rather than the line."""
+        rows = call("search_transactions", category_path="lifestyle/books")["rows"]
+        assert [r["merchant_name"] for r in rows] == ["AMAZON"]
+        assert rows[0]["amount"] == pytest.approx(-120.0)
 
     def test_recurring_flows_rejects_a_bad_direction(self, warehouse: Path) -> None:
         """Caught before it reaches SQL so the model gets told the vocabulary

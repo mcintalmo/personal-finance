@@ -11,8 +11,8 @@ agent the ability to rewrite the user's YAML config.
 
 **Everything here is read-only, enforced by the database rather than by
 inspecting SQL.** :func:`readonly_connection` opens DuckDB with
-``read_only=True`` and then disables external access. Both are load-bearing,
-and neither is sufficient alone:
+``read_only=True`` and disables external access. Both are load-bearing, and
+neither is sufficient alone:
 
 * ``read_only=True`` makes INSERT/UPDATE/DROP/CREATE/ATTACH fail inside the
   engine. A model cannot talk its way past it, because nothing is parsing the
@@ -23,11 +23,29 @@ and neither is sufficient alone:
   enable_external_access=false`` closes that, and DuckDB refuses every attempt
   to turn it back on (``SET``, ``SET GLOBAL``, ``PRAGMA``, ``RESET`` all raise),
   so the guard survives hostile SQL.
-* Banning external access outright would also break the warehouse, because
-  the silver layer is dbt *views* over bronze Parquet. ``allowed_directories``
-  re-permits exactly the bronze landing zone and nothing else. That allowlist
-  cannot be widened from SQL either, and ``COPY ... TO`` stays refused, so
-  there is no write-shaped way out.
+
+**No filesystem allowlist is needed, and that is deliberate.** An earlier
+version of this module allow-listed the bronze landing zone so the silver
+layer would resolve, because silver was dbt *views* over Parquet. Two review
+findings killed that design outright:
+
+* ``allowed_directories`` confers **write as well as read**, and DuckDB has no
+  read-only variant (``allowed_paths`` blocks writes but also blocks the
+  directory listing a glob needs). So ``COPY ... TO '<bronze>/x.parquet'``
+  succeeded, and since the views globbed that directory the injected rows
+  appeared on the very next query with no ``pf transform`` — a live
+  ledger-injection path, and a mismatched schema broke every transaction-level
+  query permanently.
+* Scoping the grant per connection does not help: both settings are **GLOBAL**
+  to the shared DuckDB instance, so a grant made for one connection leaks to
+  every other one open at the same time, and MCP hosts routinely call tools in
+  parallel.
+
+The fix was to remove the need for the grant rather than to police it: the
+silver layer is now materialized as tables (``transform/dbt_project.yml``), so
+nothing in the warehouse reads from disk. Every connection here runs with no
+filesystem access whatsoever, which is both airtight and simpler — and it
+leaves the *whole* warehouse queryable, silver included.
 
 That combination is what makes :func:`run_sql` defensible. Open-ended SQL is
 the difference between "an agent that reads the same tables the dashboard
@@ -44,6 +62,7 @@ ledger.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from contextlib import contextmanager
@@ -77,10 +96,12 @@ def readonly_connection() -> Iterator[duckdb.DuckDBPyConnection]:
     Short-lived and per-call, matching the pattern the REST API and CLI
     already use — this is a single-user local app with no writer contention.
 
-    See the module docstring for why both guards are required.
+    No directory is allow-listed: the silver layer is materialized, so nothing
+    in the warehouse needs to read a file. See the module docstring for why
+    that matters — the allowlist was a write path, and per-connection scoping
+    could not contain it because the settings are global to the instance.
     """
-    settings = get_settings()
-    warehouse = settings.data.warehouse_path
+    warehouse = get_settings().data.warehouse_path
     if not warehouse.exists():
         message = (
             f"The warehouse {warehouse} does not exist yet. "
@@ -102,20 +123,23 @@ def readonly_connection() -> Iterator[duckdb.DuckDBPyConnection]:
         )
         raise ToolError(message) from exc
     try:
-        # Order matters, and so does the allowlist. The silver layer is dbt
-        # *views* over bronze Parquet, so a blanket ban on external access
-        # would make every transaction-level query fail with a permission
-        # error — the guard would appear to work while silently removing half
-        # the warehouse. `allowed_directories` re-permits exactly the bronze
-        # landing zone ("ALWAYS allowed ... even when enable_external_access is
-        # false") and nothing else. Verified: the allowlist cannot be widened
-        # afterwards, external access cannot be re-enabled, and COPY ... TO is
-        # refused, so this is not a hole in the read-only guarantee.
-        conn.execute("SET allowed_directories=?", [[str(settings.data.bronze_path.resolve())]])
         conn.execute("SET enable_external_access=false")
         yield conn
     finally:
         conn.close()
+
+
+def _require_tables(conn: duckdb.DuckDBPyConnection, *qualified: str) -> None:
+    """Check EVERY table a tool touches, not just the headline one.
+
+    Checking one table per tool leaves the joins unguarded, so a
+    half-transformed warehouse produces a raw CatalogException naming a table
+    the agent never asked about — which is the failure this function exists to
+    prevent.
+    """
+    for name in qualified:
+        schema, _, table = name.partition(".")
+        _require_table(conn, schema, table)
 
 
 def _require_table(conn: duckdb.DuckDBPyConnection, schema: str, table: str) -> None:
@@ -155,7 +179,7 @@ def _records(cursor: duckdb.DuckDBPyConnection, limit: int) -> list[dict[str, An
     trailing semicolons, comments) and a rewrite that silently changes results
     is worse than one that refuses.
     """
-    columns = [description[0] for description in cursor.description or []]
+    columns = _unique_columns([description[0] for description in cursor.description or []])
     rows = cursor.fetchmany(limit)
     return [
         {column: _jsonable(value) for column, value in zip(columns, row, strict=True)}
@@ -163,11 +187,43 @@ def _records(cursor: duckdb.DuckDBPyConnection, limit: int) -> list[dict[str, An
     ]
 
 
-def _query(sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Run a curated tool's own SQL and return capped records."""
+def _unique_columns(names: list[str]) -> list[str]:
+    """Suffix repeated column names so none are lost to dict collision.
+
+    `SELECT a.*, b.*` across two marts yields duplicate names, and building a
+    dict straight from them silently drops every repeat — the row still looks
+    well-formed and `row_count` is unaffected, so a model would reason over
+    half the columns it asked for and never know. `run_sql`'s own docstring
+    recommends exactly the cross-mart joins that trigger it.
+    """
+    seen: dict[str, int] = {}
+    unique = []
+    for name in names:
+        count = seen.get(name, 0)
+        seen[name] = count + 1
+        unique.append(name if count == 0 else f"{name}_{count + 1}")
+    return unique
+
+
+def _query(sql: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run a curated tool's own SQL and return a capped result envelope.
+
+    Every tabular tool returns the same shape as :func:`run_sql` — one thing
+    for a model to learn, and, more importantly, a `truncated` flag on all of
+    them. Returning a bare list would let a capped page read as the complete
+    answer, which is the same silent-wrongness the row cap exists to avoid.
+
+    """
     limit = get_settings().mcp.max_rows
     with readonly_connection() as conn:
-        return _records(conn.execute(sql, params or {}), limit)
+        cursor = conn.execute(sql, params or {})
+        rows = _records(cursor, limit)
+        return {
+            "row_count": len(rows),
+            "truncated": len(cursor.fetchmany(1)) > 0,
+            "row_limit": limit,
+            "rows": rows,
+        }
 
 
 def build_server() -> FastMCP:
@@ -227,7 +283,7 @@ def build_server() -> FastMCP:
         return tables
 
     @mcp.tool
-    def describe_table(qualified_name: str) -> list[dict[str, Any]]:
+    def describe_table(qualified_name: str) -> dict[str, Any]:
         """Show the columns and types of one table, e.g. `main_gold.gold_monthly_flow`.
 
         Call this before writing `run_sql` against a table you have not used
@@ -244,7 +300,7 @@ def build_server() -> FastMCP:
             "WHERE table_schema = $schema AND table_name = $table ORDER BY ordinal_position",
             {"schema": schema, "table": table},
         )
-        if not columns:
+        if not columns["rows"]:
             message = f"No table named {qualified_name!r}. Call list_tables to see what exists."
             raise ToolError(message)
         return columns
@@ -255,27 +311,27 @@ def build_server() -> FastMCP:
         return list_tables()
 
     @mcp.resource("schema://{qualified_name}")
-    def table_resource(qualified_name: str) -> list[dict[str, Any]]:
+    def table_resource(qualified_name: str) -> dict[str, Any]:
         """Columns and types for one table."""
         return describe_table(qualified_name)
 
     # ── Curated tools ───────────────────────────────────────
 
     @mcp.tool
-    def list_categories() -> list[dict[str, Any]]:
+    def list_categories() -> dict[str, Any]:
         """List the category taxonomy as full paths, e.g. `essentials/groceries`.
 
         Use these paths verbatim when filtering by category — they are the
         vocabulary the rest of the tools expect.
         """
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_category_paths")
+            _require_tables(conn, f"{_GOLD}.gold_category_paths")
         return _query(f"SELECT path, depth FROM {_GOLD}.gold_category_paths ORDER BY path")
 
     @mcp.tool
     def monthly_flow(
         start_month: str | None = None, end_month: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Total income, spend and net flow per calendar month.
 
         Months are ISO dates on the first of the month ('2026-01-01'), and both
@@ -283,7 +339,7 @@ def build_server() -> FastMCP:
         excluded, so this is real money in and out.
         """
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_monthly_flow")
+            _require_tables(conn, f"{_GOLD}.gold_monthly_flow")
         return _query(
             "SELECT month, total_inflow, total_outflow, net_amount, transaction_count "
             f"FROM {_GOLD}.gold_monthly_flow "
@@ -297,20 +353,31 @@ def build_server() -> FastMCP:
         category_path: str | None = None,
         start_month: str | None = None,
         end_month: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Spend rolled up by category, including all descendants.
 
         `category_path` filters to one subtree (e.g. 'essentials' also covers
         'essentials/groceries'); omit it for every category. Outflow is a
-        positive magnitude.
+        positive magnitude. Bounding by month re-rolls from line items, so the
+        result covers only categories with activity in the window; unbounded,
+        every category appears, zeroed if nothing rolled up to it.
         """
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_category_rollups")
+            if start_month or end_month:
+                _require_tables(
+                    conn,
+                    f"{_GOLD}.gold_line_items",
+                    f"{_GOLD}.gold_category_ancestors",
+                    f"{_GOLD}.gold_category_paths",
+                )
+            else:
+                _require_tables(conn, f"{_GOLD}.gold_category_rollups")
         if start_month or end_month:
             # The rollup mart is all-time, so a time-bounded question has to go
             # back to line items and re-roll through the closure table.
             return _query(
-                "SELECT anc.path AS path, sum(-li.amount) AS total_outflow, count(*) AS line_items "
+                "SELECT anc.path AS path, sum(-li.amount) AS total_outflow, "
+                "count(*) AS transaction_count "
                 f"FROM {_GOLD}.gold_line_items AS li "
                 f"JOIN {_GOLD}.gold_category_ancestors AS a ON a.category_id = li.category_id "
                 f"JOIN {_GOLD}.gold_category_paths AS anc ON anc.id = a.ancestor_id "
@@ -330,10 +397,10 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool
-    def top_merchants(limit: int = 10) -> list[dict[str, Any]]:
+    def top_merchants(limit: int = 10) -> dict[str, Any]:
         """The merchants the user spends the most with, highest first."""
         with readonly_connection() as conn:
-            _require_table(conn, _SILVER, "silver_merchants")
+            _require_tables(conn, f"{_SILVER}.silver_merchants")
         return _query(
             "SELECT merchant_name, transaction_count, total_outflow "
             f"FROM {_SILVER}.silver_merchants ORDER BY total_outflow DESC LIMIT $limit",
@@ -341,21 +408,21 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool
-    def budget_status() -> list[dict[str, Any]]:
+    def budget_status() -> dict[str, Any]:
         """Budget versus actual for every configured budget and period.
 
-        `variance` is budgeted minus actual, so a negative value means the
-        period ran over.
+        `variance` is actual minus budgeted (matching gold_budget_actuals), so
+        a POSITIVE value means the period ran over.
         """
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_budget_actuals")
+            _require_tables(conn, f"{_GOLD}.gold_budget_actuals")
         return _query(
             "SELECT name, period, period_start, budgeted_amount, actual_outflow, variance "
             f"FROM {_GOLD}.gold_budget_actuals ORDER BY name, period_start"
         )
 
     @mcp.tool
-    def recurring_flows(flow: str | None = None) -> list[dict[str, Any]]:
+    def recurring_flows(flow: str | None = None) -> dict[str, Any]:
         """Detected recurring charges and income (subscriptions, rent, salary).
 
         `flow` filters to 'inflow' or 'outflow'; omit for both. `cadence` is
@@ -366,7 +433,7 @@ def build_server() -> FastMCP:
             message = f"flow must be 'inflow' or 'outflow', not {flow!r}."
             raise ToolError(message)
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_recurring_flows")
+            _require_tables(conn, f"{_GOLD}.gold_recurring_flows")
         return _query(
             "SELECT merchant_name, flow, amount, cadence, occurrence_count, "
             f"first_seen_on, last_seen_on FROM {_GOLD}.gold_recurring_flows "
@@ -375,7 +442,7 @@ def build_server() -> FastMCP:
         )
 
     @mcp.tool
-    def forecast() -> list[dict[str, Any]]:
+    def forecast() -> dict[str, Any]:
         """Spend and income forecasts for the coming months.
 
         Each row splits `predicted_amount` into a `committed_amount` (recurring
@@ -384,7 +451,7 @@ def build_server() -> FastMCP:
         variable part only. Empty until `pf forecast` has been run.
         """
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_forecasts")
+            _require_tables(conn, f"{_GOLD}.gold_forecasts")
         return _query(
             "SELECT series_kind, series_label, period_start, horizon, committed_amount, "
             "variable_amount, predicted_amount, lower_bound, upper_bound, trend, model_name "
@@ -399,27 +466,44 @@ def build_server() -> FastMCP:
         end_date: str | None = None,
         min_amount: float | None = None,
         limit: int = 50,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Find individual transactions matching any combination of filters.
 
-        `merchant` is a case-insensitive substring match. `min_amount` is a
-        magnitude, so 100 finds transactions of $100 or more in either
-        direction. Results are newest first.
+        One row per transaction, newest first. `merchant` is a case-insensitive
+        substring match; `min_amount` is a magnitude, so 100 finds transactions
+        of $100 or more in either direction. `category_paths` is a list because
+        a split transaction (an Amazon order, say) can span several categories.
         """
         with readonly_connection() as conn:
-            _require_table(conn, _SILVER, "silver_transactions")
+            _require_tables(
+                conn,
+                f"{_SILVER}.silver_transactions",
+                f"{_GOLD}.gold_line_items",
+                f"{_GOLD}.gold_category_paths",
+            )
+        # One row per TRANSACTION. Joining gold_line_items directly fans a split
+        # transaction (an Amazon order decomposed into N products) into N rows,
+        # each repeating the transaction's FULL amount — so a model summing the
+        # result over-reports that spend N-fold, and `limit` starts counting
+        # duplicates. Categories are collapsed into a list instead.
         return _query(
-            "SELECT t.posted_on, t.merchant_name, t.amount, t.flow, t.is_transfer, "
-            "p.path AS category_path "
+            "WITH matched AS ("
+            "SELECT t.transaction_id, t.posted_on, t.merchant_name, t.amount, t.flow, "
+            "t.is_transfer, p.path AS category_path "
             f"FROM {_SILVER}.silver_transactions AS t "
             f"LEFT JOIN {_GOLD}.gold_line_items AS li ON li.transaction_id = t.transaction_id "
             f"LEFT JOIN {_GOLD}.gold_category_paths AS p ON p.id = li.category_id "
             "WHERE ($merchant IS NULL OR lower(t.merchant_name) LIKE '%' || lower($merchant) || '%') "
-            "AND ($path IS NULL OR p.path = $path OR p.path LIKE $path || '/%') "
             "AND ($start IS NULL OR t.posted_on >= $start::DATE) "
             "AND ($end IS NULL OR t.posted_on <= $end::DATE) "
-            "AND ($min IS NULL OR abs(t.amount) >= $min) "
-            "ORDER BY t.posted_on DESC LIMIT $limit",
+            "AND ($min IS NULL OR abs(t.amount) >= $min)) "
+            "SELECT posted_on, merchant_name, amount, flow, is_transfer, "
+            "list_sort(list_distinct(list(category_path))) AS category_paths "
+            "FROM matched "
+            "WHERE ($path IS NULL OR transaction_id IN (SELECT transaction_id FROM matched "
+            "WHERE category_path = $path OR category_path LIKE $path || '/%')) "
+            "GROUP BY transaction_id, posted_on, merchant_name, amount, flow, is_transfer "
+            "ORDER BY posted_on DESC LIMIT $limit",
             {
                 "merchant": merchant,
                 "path": category_path,
@@ -443,7 +527,15 @@ def build_server() -> FastMCP:
         from personal_finance.callouts import detect_callouts
 
         with readonly_connection() as conn:
-            _require_table(conn, _GOLD, "gold_recurring_flows")
+            # detect_callouts reaches silver_transactions via load_series, so
+            # checking only the recurring mart would leave the agent staring at
+            # a CatalogException for a table it never named.
+            _require_tables(
+                conn,
+                f"{_GOLD}.gold_recurring_flows",
+                f"{_GOLD}.gold_line_items",
+                f"{_SILVER}.silver_transactions",
+            )
             feed = detect_callouts(conn, limit=max(1, limit))
         return [
             {
@@ -467,11 +559,14 @@ def build_server() -> FastMCP:
         custom groupings, window functions. Call `list_tables` and
         `describe_table` first so you are writing against real columns.
 
-        The connection cannot write and cannot read local files, so there is
-        no need to be cautious about phrasing; a query that tries either fails
-        rather than doing something unintended. Results are capped, and the
-        response says so when rows were dropped, so add your own aggregation
-        or LIMIT rather than assuming you received everything.
+        Covers the whole warehouse: `main_gold` marts, `main_silver`
+        transaction-level detail, and the `main` app tables.
+
+        The connection cannot write and cannot read files, so there is no need
+        to be cautious about phrasing; a query that tries either fails rather
+        than doing something unintended. Results are capped, and the response
+        says so when rows were dropped, so aggregate or add your own LIMIT
+        rather than assuming you received everything.
         """
         settings = get_settings().mcp
         limit = settings.max_rows
@@ -480,10 +575,25 @@ def build_server() -> FastMCP:
             # query in SQL: a cartesian join costs nothing to write and would
             # otherwise hang the agent indefinitely. The connection stays
             # usable afterwards, and it is closed by the context manager.
-            timer = threading.Timer(settings.query_timeout_seconds, conn.interrupt)
+            # Guarded: timer.cancel() cannot stop a callback already dispatched,
+            # and readonly_connection closes the connection immediately after —
+            # an unguarded conn.interrupt() would then raise inside the timer
+            # thread and print a traceback to stderr.
+            def _interrupt() -> None:
+                with contextlib.suppress(duckdb.Error):
+                    conn.interrupt()
+
+            timer = threading.Timer(settings.query_timeout_seconds, _interrupt)
             timer.start()
             try:
                 cursor = conn.execute(query)
+                if cursor is None:
+                    # DuckDB returns None when the input holds no statement (a
+                    # bare comment, or whitespace). Dereferencing .description
+                    # would raise AttributeError, which bypasses the
+                    # hand-the-model-the-real-message path below.
+                    message = "The query contained no SQL statement."
+                    raise ToolError(message)
                 rows = _records(cursor, limit)
                 truncated = len(cursor.fetchmany(1)) > 0
             except duckdb.InterruptException as exc:

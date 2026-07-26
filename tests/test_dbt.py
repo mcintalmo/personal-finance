@@ -2631,9 +2631,8 @@ def mcp_warehouse(forecast_warehouse, tmp_path_factory):
         conn.execute("CHECKPOINT")
     destination = tmp_path_factory.mktemp("mcp") / "warehouse.duckdb"
     shutil.copy(warehouse, destination)
-    # The silver views have the ORIGINAL bronze path compiled into them, so
-    # the copy still reads from the fixture's landing zone — and the server's
-    # allowlist has to point there, not at the copy's directory.
+    # Self-contained: silver is materialized, so the copy needs nothing from
+    # the fixture's bronze directory.
     return destination, warehouse.parent / "bronze"
 
 
@@ -2685,7 +2684,8 @@ class TestMcpToolsOverRealMarts:
         """Each tool's SQL is hand-written against mart columns. A rename in
         dbt breaks it, and nothing else in the suite would notice."""
         result = self._call(mcp_warehouse, tool)
-        assert isinstance(result, list)
+        # Tabular tools return an envelope; list_tables returns a bare list.
+        assert isinstance(result, (dict, list))
 
     def test_tools_that_should_return_data_actually_do(self, mcp_warehouse):
         """A tool returning [] because its SQL silently matched nothing looks
@@ -2697,16 +2697,30 @@ class TestMcpToolsOverRealMarts:
             "forecast",
             "recurring_flows",
         ):
-            assert self._call(mcp_warehouse, tool), f"{tool} returned no rows"
+            assert self._call(mcp_warehouse, tool)["rows"], f"{tool} returned no rows"
 
     def test_spend_by_category_time_filter_uses_a_different_query_path(self, mcp_warehouse):
         """The bounded branch re-rolls through the closure table instead of
         reading the all-time mart, so it needs its own coverage."""
         bounded = self._call(
             mcp_warehouse, "spend_by_category", start_month="2026-01-01", end_month="2026-06-30"
-        )
+        )["rows"]
         assert bounded
         assert all(row["total_outflow"] > 0 for row in bounded)
+
+    def test_run_sql_reaches_the_whole_warehouse(self, mcp_warehouse):
+        """Silver is materialized, so model-authored SQL reaches transaction
+        detail as well as the marts — with no directory allow-listed.
+
+        Against a real dbt build specifically: a synthetic fixture can declare
+        silver a table by fiat, so only this proves the dbt project actually
+        materializes it.
+        """
+        for table in ("main_gold.gold_line_items", "main_silver.silver_transactions"):
+            result = self._call(
+                mcp_warehouse, "run_sql", query=f"SELECT count(*) AS n FROM {table}"
+            )
+            assert result["rows"][0]["n"] > 0, f"{table} unreachable"
 
     def test_run_sql_can_join_marts_the_curated_tools_do_not(self, mcp_warehouse):
         """The point of exposing SQL at all: a question no fixed tool answers."""
@@ -2728,6 +2742,6 @@ class TestMcpToolsOverRealMarts:
             row["column_name"]
             for row in self._call(
                 mcp_warehouse, "describe_table", qualified_name="main_gold.gold_forecasts"
-            )
+            )["rows"]
         }
         assert {"series_kind", "predicted_amount", "committed_amount", "trend"} <= columns
