@@ -16,6 +16,7 @@ dependencies = [
     "ofxtools>=1.1.1",
     "plotly>=6.9.0",
     "pydantic>=2.13.4",
+    "pydantic-ai-slim[ag-ui,mcp,openai,ui]>=2.13.0",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
     "scipy>=1.18.0",

@@ -32,7 +32,7 @@ receipts only), so Phase 5 targeted Amazon only; Costco (and other photo/PDF-onl
 in Phase 9 until vision-LLM parsing exists.
 
 - [x] Recurring-expense detection (heuristic dbt model: merchant + amount + cadence): see Done below.
-- [ ] NL chat agent (Ollama tool-calling over governed gold-mart queries) — MCP tool server done, see Done below
+- [x] NL chat agent (Ollama tool-calling over governed gold-mart queries): see Done below.
 - [x] Forecasting of spend/income (statsmodels): see Done below.
 - [x] Trend and anomaly callouts on the dashboard: see Done below.
 
@@ -76,6 +76,75 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stage 6 — `pf chat`: a Pydantic AI agent over local Ollama, answering from the
+      Stage A MCP tools. Stage B of the agent plan.
+
+      **The agent owns no data access.** Every figure it can state comes from the MCP tool
+      server over HTTP; `personal_finance.agent` never opens the warehouse. That is what keeps
+      Stage A's read-only guarantee meaningful — it is enforced in the *other* process, so
+      nothing here could weaken it even if the model asked.
+
+      **The tool server must be out-of-process, and that is a constraint rather than a
+      preference.** DuckDB refuses a read-only connection while the same *process* holds a
+      read-write one, and the FastAPI app the agent is mounted on opens read-write connections
+      for review labeling — so in-process (FastMCP's in-memory transport) the two would race on
+      whichever opened first. Worse, `enable_external_access=false` is GLOBAL to the DuckDB
+      instance, so an in-process server would apply it to the API's own connections too: the
+      same class of global-setting bug that had to be fixed twice in Stage A. Out of process,
+      none of it is reachable. `settings.mcp.url` is therefore a *client* address, deliberately
+      separate from the `MCP_HTTP_HOST`/`PORT` bind settings — binding `0.0.0.0` says nothing
+      about where a client should connect.
+
+      Two surfaces, one agent: `POST /agent` on the existing FastAPI app (AG-UI event stream,
+      via `AGUIAdapter.dispatch_request`) for a frontend to drive, and `pf chat` (Pydantic AI's
+      built-in web UI) so Phase 7's demo criterion is reachable now rather than waiting on the
+      Dash frontend in Stage C.
+
+      `settings.ollama.agent_model` is separate from `chat_model` because it is a different job,
+      not a bigger version of one: `chat_model` categorizes a single merchant string thousands
+      of times, where 3B is the right trade; this drives a multi-step loop over twelve tools and
+      writes SQL, which needs dependable function calling and far more context. Defaults to
+      `qwen3:8b`.
+
+      **Both preconditions are checked up front, not at the first question.** Ollama pulls
+      nothing implicitly and the tool server may not be running, and either failure would
+      otherwise surface halfway through a streamed answer as "All connection attempts failed" —
+      naming neither the thing that is down nor the command that starts it. `pf chat` refuses to
+      boot and `POST /agent` returns a 503 that names `ollama pull <model>` / `pf mcp --http`.
+
+      Tests use a `FunctionModel`/`TestModel` against the **real** MCP server over FastMCP's
+      in-memory transport, so tool calls run genuine SQL against a genuine DuckDB warehouse — no
+      Ollama, no listening socket, but a tool whose result shape changed still fails here. That
+      covers the retry path too: a deliberately bad `run_sql` must come back carrying DuckDB's
+      own message so the model can correct itself, which is why `mcp_server` hands back the real
+      error rather than a sanitized one.
+
+      **Live verification against real Ollama found two defects the tests could not.** Driving
+      the agent with an actual local model showed it guess `main_silver.transactions`, receive
+      DuckDB's catalog error, and then resend the *identical* query — dying on Pydantic AI's
+      default of one retry, which buys a blind repeat rather than a correction. Two fixes:
+      `retries=3` on the agent, and, more usefully, `run_sql` now answers a guessed name with
+      the real ones. On a CatalogException it lists the queryable tables; on a BinderException
+      it lists the columns of whichever tables the query actually named. Both come from
+      `information_schema`, so there is nothing to keep in sync. This replaced a two-round-trip
+      recovery (fail → `list_tables` → retry) with a one-round-trip one, and it matters because
+      DuckDB's own hints mislead here: "Did you mean" suggested a name from an attached database
+      that this tool cannot query, and "Candidate bindings" offered one unrelated column.
+      Confirmed by re-running: with the table list in the error, the model went straight to the
+      correct table on its next attempt. Kept off syntax errors deliberately — burying the
+      parser's message, the one thing that locates a syntax error, under a wall of names would
+      be a regression.
+
+      **Not verified: whether the default `qwen3:8b` can author SQL well enough end to end.**
+      Only `qwen2.5:3b` is pulled on this machine, and it answers curated-tool questions
+      correctly ($18,876.63 over 255 grocery transactions, matching the mart exactly) but cannot
+      reliably write SQL against a schema it has to discover first — it invented table and
+      column names past the point where better errors could help. That is the model-capability
+      gap `agent_model` exists to close, and it is why the default is not 3B.
+
+      Also fixed comment rot in `pf mcp`'s docstring, which still described the bronze-directory
+      allowlist that Stage A's final design removed.
 
 - [x] Phase 7 stage 5 — `pf mcp`: a governed MCP tool server over the warehouse. Stage A of the
       agent plan: expose the data as tools first, so the agent (and Claude Desktop, and a future

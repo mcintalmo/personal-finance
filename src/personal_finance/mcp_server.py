@@ -157,6 +157,47 @@ def _require_table(conn: duckdb.DuckDBPyConnection, schema: str, table: str) -> 
         raise ToolError(message)
 
 
+def _qualified_tables(conn: duckdb.DuckDBPyConnection) -> list[str]:
+    """Every queryable table name, for putting real options in an error message."""
+    rows = conn.execute(
+        "SELECT table_schema || '.' || table_name FROM information_schema.tables "
+        "WHERE table_schema IN ($a, $b, $c) ORDER BY table_schema, table_name",
+        dict(zip("abc", _VISIBLE_SCHEMAS, strict=True)),
+    ).fetchall()
+    return [name for (name,) in rows]
+
+
+def _schema_hint(conn: duckdb.DuckDBPyConnection, query: str) -> str:
+    """Describe whatever the failing query was reaching for.
+
+    If the query names real tables, their columns are the useful reply — a
+    wrong column name is otherwise a whole round trip through
+    ``describe_table``. Matching is a plain substring test on the qualified
+    name rather than SQL parsing: the goal is a better error message, and a
+    parser that could be fooled by a name inside a string literal would only
+    add a way to be wrong. If nothing matches, the table list is the right
+    answer instead, because the model is not yet aiming at anything real.
+    """
+    lowered = query.lower()
+    described = []
+    for qualified in _qualified_tables(conn):
+        if qualified.lower() not in lowered:
+            continue
+        schema, _, table = qualified.partition(".")
+        columns = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = $schema AND table_name = $table ORDER BY ordinal_position",
+            {"schema": schema, "table": table},
+        ).fetchall()
+        described.append(f"{qualified} has columns: {', '.join(name for (name,) in columns)}")
+    if described:
+        return " ".join(described)
+    return (
+        f"The queryable tables are: {', '.join(_qualified_tables(conn))}. "
+        "Call describe_table on the one you want for its column names."
+    )
+
+
 def _jsonable(value: Any) -> Any:
     """Make a DuckDB scalar safe to serialize.
 
@@ -600,6 +641,21 @@ def build_server() -> FastMCP:
                 message = (
                     f"Query exceeded the {settings.query_timeout_seconds:g}s time limit. "
                     "Narrow it with a WHERE clause or aggregate before returning rows."
+                )
+                raise ToolError(message) from exc
+            except (duckdb.CatalogException, duckdb.BinderException) as exc:
+                # Guessed table and column names are the two commonest ways
+                # model-written SQL fails, and the server already knows every
+                # real name — so it says them, instead of sending the model
+                # away to discover what could have been in the error all along.
+                # Observed live, with only DuckDB's own message: a model resent
+                # an identical query until the retry budget was gone. DuckDB's
+                # hints actively mislead here — "Did you mean" suggests names
+                # from attached databases that this tool cannot query, and
+                # "Candidate bindings" offered a single unrelated column.
+                message = (
+                    f"Query failed: {exc}\nDo not resend this query unchanged. "
+                    + _schema_hint(conn, query)
                 )
                 raise ToolError(message) from exc
             except duckdb.Error as exc:

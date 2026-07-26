@@ -54,6 +54,13 @@ class OllamaSettings(BaseModel):
     base_url: str = "http://localhost:11434"
     embedding_model: str = "nomic-embed-text"
     chat_model: str = "phi3:mini"
+    # Separate from chat_model because it is a different job, not a bigger
+    # version of the same one. chat_model categorizes one merchant string per
+    # call, thousands of times, where a 3B model is the right trade. This one
+    # drives the chat agent's multi-step loop over a dozen MCP tools and has
+    # to write SQL, which needs dependable function calling and far more
+    # context. Must be pulled (`ollama pull qwen3:8b`); `pf chat` checks.
+    agent_model: str = "qwen3:8b"
 
 
 class ServingSettings(BaseModel):
@@ -74,12 +81,19 @@ class McpSettings(BaseModel):
     limits as much as safety limits: a model that asks for every transaction
     gets a truncation notice rather than tens of thousands of rows it cannot
     reason over anyway.
+
+    ``http_host``/``http_port`` are *bind* settings for ``pf mcp --http``;
+    ``url`` is the *client* address the chat agent dials. They are separate
+    fields rather than one derived from the other for the same reason
+    ``serving.api_url`` is separate from ``pf serve --host``: binding
+    ``0.0.0.0`` says nothing about the address a client should connect to.
     """
 
     max_rows: int = 500
     query_timeout_seconds: float = 30.0
     http_host: str = "127.0.0.1"
     http_port: int = 8001
+    url: str = "http://127.0.0.1:8001/mcp"
 
 
 class Settings(BaseSettings):

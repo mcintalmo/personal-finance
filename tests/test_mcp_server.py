@@ -376,6 +376,44 @@ class TestRunSql:
         with pytest.raises(ToolError, match="Query failed"):
             call("run_sql", query="SELECT FROM WHERE")
 
+    def test_a_syntax_error_does_not_dump_the_schema(self, warehouse: Path) -> None:
+        """The schema hint is for guessed *names*. Attaching it to every
+        failure would bury the parser's message — the one thing that actually
+        locates a syntax error — under a wall of table names."""
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT FROM WHERE")
+        assert "has columns" not in str(caught.value)
+        assert "queryable tables are" not in str(caught.value)
+
+    def test_a_guessed_table_name_is_answered_with_the_real_ones(self, warehouse: Path) -> None:
+        """Observed live: given only DuckDB's message, a model resent the
+        identical query until its retry budget was gone. DuckDB's own "Did you
+        mean" makes it worse, suggesting names from attached databases that
+        this tool cannot query. The server knows the real names, so it says
+        them."""
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT * FROM main_silver.transactions")
+        message = str(caught.value)
+        assert "Do not resend this query unchanged" in message
+        assert "main_silver.silver_transactions" in message
+        assert "main_gold.gold_monthly_flow" in message
+
+    def test_a_guessed_column_name_is_answered_with_that_tables_columns(
+        self, warehouse: Path
+    ) -> None:
+        """The follow-on failure once the table name is right. Sending the
+        model to `describe_table` would cost a whole round trip for something
+        the server can answer immediately."""
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT outflow_amount FROM main_silver.silver_transactions")
+        message = str(caught.value)
+        assert "main_silver.silver_transactions has columns:" in message
+        assert "merchant_name" in message
+        assert "posted_on" in message
+        # Only the table the query actually named — dumping every table's
+        # columns would drown the relevant one.
+        assert "gold_monthly_flow has columns" not in message
+
 
 class TestSchemaDiscovery:
     def test_list_tables_reports_what_can_be_queried(self, warehouse: Path) -> None:
