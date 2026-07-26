@@ -6,7 +6,9 @@ tests are wired into CI with no extra workflow step: if a dbt data test fails,
 CI fails.
 """
 
+import asyncio
 import json
+import shutil
 import warnings
 from datetime import date, datetime
 from decimal import Decimal
@@ -14,6 +16,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from fastmcp import Client
 
 from personal_finance.callouts import (
     _NEXT_FORECAST_SQL,
@@ -21,11 +24,13 @@ from personal_finance.callouts import (
     ForecastRow,
     detect_callouts,
 )
+from personal_finance.config import get_settings
 from personal_finance.ddl import create_schema
 from personal_finance.embed import merchant_embedding_id, product_embedding_id
 from personal_finance.forecast import compute_forecasts, load_series
 from personal_finance.ingest import run_ingestion
 from personal_finance.llm_categorize import merchant_llm_category_id, product_llm_category_id
+from personal_finance.mcp_server import build_server as build_mcp_server
 from personal_finance.models import ForecastSeriesKind
 from personal_finance.seed import seed_budgets, seed_categories, seed_merchant_aliases, seed_rules
 from personal_finance.synth import (
@@ -2608,3 +2613,135 @@ class TestCalloutsOverRealMarts:
             feed = detect_callouts(conn, today=date(2026, 7, 15))
         assert feed.forecasts_available is False
         assert all(c.kind in {CalloutKind.SPIKE, CalloutKind.DIP} for c in feed.callouts)
+
+
+@pytest.fixture(scope="module")
+def mcp_warehouse(forecast_warehouse, tmp_path_factory):
+    """A *copy* of the built warehouse, so it can be opened read-only.
+
+    dbt-duckdb keeps its read-write connection open after a build, and DuckDB
+    refuses a read-only connection to a file the same process already holds
+    for writing. Copying sidesteps that entirely — and costs a file copy
+    rather than another dbt run. CHECKPOINT first: closing a connection does
+    not fold the WAL into the file, so a bare copy would arrive missing every
+    table dbt created.
+    """
+    warehouse, _ = forecast_warehouse
+    with duckdb.connect(str(warehouse)) as conn:
+        conn.execute("CHECKPOINT")
+    destination = tmp_path_factory.mktemp("mcp") / "warehouse.duckdb"
+    shutil.copy(warehouse, destination)
+    # Self-contained: silver is materialized, so the copy needs nothing from
+    # the fixture's bronze directory.
+    return destination, warehouse.parent / "bronze"
+
+
+class TestMcpToolsOverRealMarts:
+    """The MCP tools' SQL, run against real mart schemas.
+
+    test_mcp_server.py builds a synthetic two-table warehouse to attack the
+    read-only guards at millisecond speed. That deliberately cannot catch a
+    tool referencing a column the marts do not actually have — a whole class
+    of bug that only appears against the real thing. This class closes that
+    gap by reusing the already-built module-scoped fixture, so it costs no
+    additional dbt build.
+    """
+
+    @staticmethod
+    def _call(mcp_warehouse, tool: str, **arguments):
+        warehouse, bronze = mcp_warehouse
+
+        async def _run():
+            async with Client(build_mcp_server()) as client:
+                return (await client.call_tool(tool, arguments)).data
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("DATA_WAREHOUSE_PATH", str(warehouse))
+        monkeypatch.setenv("DATA_BRONZE_PATH", str(bronze))
+        get_settings.cache_clear()
+        try:
+            return asyncio.run(_run())
+        finally:
+            monkeypatch.undo()
+            get_settings.cache_clear()
+
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            "list_categories",
+            "monthly_flow",
+            "spend_by_category",
+            "top_merchants",
+            "budget_status",
+            "recurring_flows",
+            "forecast",
+            "search_transactions",
+            "callouts",
+            "list_tables",
+        ],
+    )
+    def test_every_curated_tool_runs_against_the_real_marts(self, mcp_warehouse, tool):
+        """Each tool's SQL is hand-written against mart columns. A rename in
+        dbt breaks it, and nothing else in the suite would notice."""
+        result = self._call(mcp_warehouse, tool)
+        # Tabular tools return an envelope; list_tables returns a bare list.
+        assert isinstance(result, (dict, list))
+
+    def test_tools_that_should_return_data_actually_do(self, mcp_warehouse):
+        """A tool returning [] because its SQL silently matched nothing looks
+        identical to a tool returning [] because there is nothing to report."""
+        for tool in (
+            "monthly_flow",
+            "top_merchants",
+            "budget_status",
+            "forecast",
+            "recurring_flows",
+        ):
+            assert self._call(mcp_warehouse, tool)["rows"], f"{tool} returned no rows"
+
+    def test_spend_by_category_time_filter_uses_a_different_query_path(self, mcp_warehouse):
+        """The bounded branch re-rolls through the closure table instead of
+        reading the all-time mart, so it needs its own coverage."""
+        bounded = self._call(
+            mcp_warehouse, "spend_by_category", start_month="2026-01-01", end_month="2026-06-30"
+        )["rows"]
+        assert bounded
+        assert all(row["total_outflow"] > 0 for row in bounded)
+
+    def test_run_sql_reaches_the_whole_warehouse(self, mcp_warehouse):
+        """Silver is materialized, so model-authored SQL reaches transaction
+        detail as well as the marts — with no directory allow-listed.
+
+        Against a real dbt build specifically: a synthetic fixture can declare
+        silver a table by fiat, so only this proves the dbt project actually
+        materializes it.
+        """
+        for table in ("main_gold.gold_line_items", "main_silver.silver_transactions"):
+            result = self._call(
+                mcp_warehouse, "run_sql", query=f"SELECT count(*) AS n FROM {table}"
+            )
+            assert result["rows"][0]["n"] > 0, f"{table} unreachable"
+
+    def test_run_sql_can_join_marts_the_curated_tools_do_not(self, mcp_warehouse):
+        """The point of exposing SQL at all: a question no fixed tool answers."""
+        result = self._call(
+            mcp_warehouse,
+            "run_sql",
+            query=(
+                "SELECT r.merchant_name, r.cadence, f.trend "
+                "FROM main_gold.gold_recurring_flows AS r "
+                "LEFT JOIN main_gold.gold_forecasts AS f ON f.series_kind = 'total_outflow' "
+                "WHERE r.flow = 'outflow' LIMIT 5"
+            ),
+        )
+        assert result["row_count"] > 0
+        assert {"merchant_name", "cadence", "trend"} == set(result["rows"][0])
+
+    def test_describe_table_matches_a_real_mart(self, mcp_warehouse):
+        columns = {
+            row["column_name"]
+            for row in self._call(
+                mcp_warehouse, "describe_table", qualified_name="main_gold.gold_forecasts"
+            )["rows"]
+        }
+        assert {"series_kind", "predicted_amount", "committed_amount", "trend"} <= columns

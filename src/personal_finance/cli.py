@@ -17,6 +17,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
                    and record corrections
     pf forecast    project the next few months of spend/income into the forecasts table
     pf callouts    show what changed: spending spikes, trends, and budgets at risk
+    pf mcp         serve the warehouse to AI agents as read-only MCP tools
 """
 
 import json
@@ -172,6 +173,51 @@ def serve(
     import uvicorn
 
     uvicorn.run("personal_finance.api:app", host=host, port=port, reload=reload)
+
+
+@app.command()
+def mcp(
+    http: bool = typer.Option(
+        False, help="Serve over HTTP instead of stdio (for agents inside this app)."
+    ),
+    host: str | None = typer.Option(
+        None, help="HTTP bind address (default: Settings.mcp.http_host)."
+    ),
+    port: int | None = typer.Option(None, help="HTTP bind port (default: Settings.mcp.http_port)."),
+) -> None:
+    """Run the MCP tool server (personal_finance.mcp_server) over the warehouse.
+
+    Defaults to stdio, which is what desktop MCP hosts (Claude Desktop and
+    friends) launch. Use `--http` for an agent running inside this project.
+
+    Everything it exposes is read-only, enforced by DuckDB rather than by
+    inspecting SQL: the warehouse is opened `read_only=True`, external file
+    access is disabled, and the only re-permitted path is the bronze landing
+    zone the silver views need. Neither a tool nor a model-authored query can
+    modify data or read files outside it.
+    """
+    from personal_finance.mcp_server import build_server
+
+    settings = get_settings()
+    warehouse = settings.data.warehouse_path
+    if not warehouse.exists():
+        # Fail here rather than at the first tool call: a desktop host would
+        # otherwise show a server that connects fine and then errors on
+        # everything, which reads as a broken integration.
+        typer.echo(f"Warehouse {warehouse} does not exist — run `pf init-db` first.", err=True)
+        raise typer.Exit(code=1)
+
+    server = build_server()
+    if http:
+        server.run(
+            transport="http",
+            host=host or settings.mcp.http_host,
+            port=port or settings.mcp.http_port,
+        )
+    else:
+        # stdio is the transport: nothing may write to stdout except the
+        # protocol itself, so this deliberately prints no banner.
+        server.run(transport="stdio", show_banner=False)
 
 
 @app.command()

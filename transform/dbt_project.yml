@@ -56,8 +56,18 @@ clean-targets:
 
 models:
   personal_finance_transform:
+    # Silver is materialized rather than left as views, which it was until
+    # Phase 7. Views read the bronze Parquet on every query, which meant any
+    # process querying the warehouse needed filesystem access to the landing
+    # zone — and DuckDB's `allowed_directories` grants write as well as read,
+    # with no read-only variant. That made the MCP tool server's read-only
+    # guarantee unholdable: `COPY ... TO '<bronze>/x.parquet'` injected rows
+    # that the views picked up on the very next query. Tables cost disk
+    # (6.5 MB -> 11 MB on 18 months of synth data) and buy a warehouse that
+    # is self-contained, so nothing needs to reach the filesystem at all.
+    # See src/personal_finance/mcp_server.py.
     silver:
-      +materialized: view
+      +materialized: table
       +schema: silver
     gold:
       +materialized: table
