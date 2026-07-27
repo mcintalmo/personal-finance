@@ -19,6 +19,7 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf callouts    show what changed: spending spikes, trends, and budgets at risk
     pf mcp         serve the warehouse to AI agents as read-only MCP tools
     pf chat        ask questions in a browser, answered from the MCP tools
+    pf eval        score the chat agent against answers the warehouse already knows
 """
 
 import asyncio
@@ -251,6 +252,72 @@ def chat(
 
     typer.echo(f"Chat UI on http://{host}:{port} — tools from {get_settings().mcp.url}")
     uvicorn.run(FinanceAgent().to_web(), host=host, port=port)
+
+
+@app.command("eval")
+def run_eval(
+    min_score: float | None = typer.Option(
+        None, help="Exit non-zero if the fraction of passing assertions falls below this."
+    ),
+) -> None:
+    """Score the chat agent against questions whose answers the warehouse already knows.
+
+    Every case computes its expected figure by querying the marts, so this
+    asserts real numbers with no LLM judge — and it checks *how* the answer
+    was reached, since a right total found after a dozen flailing `run_sql`
+    calls means the instructions need work.
+
+    Needs the same two things `pf chat` does, plus a warehouse with marts
+    built. Slow and model-dependent by nature, which is why it is a command
+    rather than part of `pytest`.
+    """
+    from personal_finance.agent import FinanceAgent, agent_model_error, tool_server_error
+    from personal_finance.evals import AgentUnderTest, build_plan, pass_rate
+
+    for problem in (agent_model_error(), asyncio.run(tool_server_error())):
+        if problem:
+            typer.echo(problem, err=True)
+            raise typer.Exit(code=1)
+
+    settings = get_settings()
+    with duckdb.connect(str(settings.data.warehouse_path), read_only=True) as conn:
+        plan = build_plan(conn)
+    dataset = plan.dataset
+    if not dataset.cases:
+        typer.echo(
+            "No eval cases could be built — the gold/silver marts are empty. "
+            "Run `pf ingest` and `pf transform` first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if plan.skipped:
+        # Loudly, on stderr: a run of one surviving case can score 100% and
+        # satisfy --min-score, so a thin run must not read like a clean one.
+        typer.echo(
+            f"WARNING: skipped {len(plan.skipped)} case(s) with no data in the warehouse "
+            f"({', '.join(plan.skipped)}). Run `pf ingest`, `pf transform` and `pf forecast` "
+            "for the full suite.",
+            err=True,
+        )
+    typer.echo(f"Scoring {len(dataset.cases)} case(s) against {settings.ollama.agent_model}...")
+
+    async def _run() -> None:
+        agent = FinanceAgent()
+        # Entered once around the whole dataset rather than per case: the
+        # toolset caches the tool list, so re-entering per question would
+        # re-fetch it and reconnect every time, and time the reconnection as
+        # if it were the model thinking.
+        async with agent:
+            report = await dataset.evaluate(AgentUnderTest(agent).answer)
+        report.print(include_input=True, include_output=True)
+        score = pass_rate(report)
+        typer.echo(f"\nAssertions passed: {score:.0%}")
+        if min_score is not None and score < min_score:
+            typer.echo(f"Below the {min_score:.0%} floor.", err=True)
+            raise typer.Exit(code=1)
+
+    asyncio.run(_run())
 
 
 @app.command()

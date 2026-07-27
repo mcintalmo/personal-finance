@@ -63,6 +63,17 @@ Phase 6 demo):
       `write_config_file`'s whole-config re-validation as the backend safety net regardless of
       what renders the input widgets.
 
+**Mart consistency** (surfaced by the Phase 7 stage 7 eval review):
+
+- [ ] `silver_merchants.total_outflow` sums outflows with no `is_transfer` filter, unlike
+      `gold_monthly_flow`, `gold_category_rollups` and every other spend mart, all of which
+      exclude transfers between the user's own accounts. So `top_merchants` (and `GET
+      /merchants/top`, and the dashboard's top-merchant panel) can rank a transfer destination
+      as a merchant the user "spent" money with. Found because the eval suite had to drop
+      `run_sql` as an accepted route for its `top_merchant` case: an agent applying the
+      project's own convention would compute a different number and be scored wrong. Decide
+      whether the mart or the convention is right, then make them agree.
+
 **CLI polish** (pre-existing gap, affects both cascades — not scoped to any one phase):
 
 - [ ] `pf transform` hardcodes its dbt `--vars` to only `known_cities`; `embedding_model`/
@@ -76,6 +87,73 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stage 7 — `pf eval`: a pydantic-evals suite scoring the chat agent.
+
+      **The unit tests are structurally blind to the thing that matters.** They drive a
+      `FunctionModel` that writes correct SQL by construction, so every defect found by running
+      Stage B by hand — a guessed table name, an identical query resent until the retry budget
+      was gone, giving up after discovering the schema — was invisible to them. This closes that
+      gap, and it is also the only test of `AGENT_INSTRUCTIONS` and the tool docstrings, which
+      nothing else covers.
+
+      **Exact figures, no LLM judge.** Most eval suites need a judge because "was that answer
+      good?" is subjective, inheriting the judge's noise and cost. Here the ground truth is in
+      the warehouse, so every case computes its expected value by querying the marts at build
+      time. Deterministic, free, and self-updating — regenerate the synth data and the cases
+      still assert the truth rather than a figure baked in the day they were written. Five
+      cases; two are answerable only through `run_sql`, which is what separates an agent that
+      can analyse from one that reads the tables the dashboard already shows.
+
+      Cases also pin **how** the answer was reached — which tool, and how many calls — as a
+      separate assertion from correctness. A right figure produced on the twelfth `run_sql`
+      attempt is a passing answer and a failing agent; merging the two would hide the signal.
+
+      Two entry points over one dataset: `pf eval` for the scoreboard (and model comparison),
+      and an `@pytest.mark.integration` gate asserting a pass-rate floor. The `integration`
+      marker is registered and deselected via `addopts`, so CI — which has no Ollama — never
+      sees it.
+
+      **Running it immediately found a bug the unit tests missed, of exactly the kind this
+      suite exists to catch.** `AgentUnderTest` was a callable object with an async `__call__`;
+      pydantic-evals decides whether to await via `inspect.iscoroutinefunction`, which is False
+      for an instance (it inspects the object, not `type(obj).__call__`). Every case scored 0%
+      against an un-awaited coroutine — and the report read as a total *agent* failure rather
+      than a broken harness. The unit test passed because it awaited the task by hand. Fixed by
+      passing the bound method, and pinned by a test that drives the task through the real
+      `Dataset.evaluate` rather than calling it directly.
+
+      **A pre-merge review found the load-bearing assertion was unsound.** `mentions_amount` was
+      a bare unanchored substring test, and ten wrong answers were confirmed scoring as correct:
+      `$91,234.56` satisfied an expected `$1,234.56` (comma-stripping *creates* the collision),
+      `$50.00` satisfied `$5.00` (under $10 the whole-dollar rendering is one character, so the
+      test degenerates to "contains a 5"), and a count of 30 matched the `30` inside a date. For
+      a harness whose only job is catching wrong figures, that made every number it reported
+      meaningless — and the rejection tests were vacuous against it, since all three wrong values
+      differed in their leading digit. Now anchored on digit boundaries, with counts matched
+      separately from money because counts collide with dates and years in a way money does not.
+
+      Four more of the same class, each fixed and pinned: **sign was discarded**, so a $2,000
+      surplus satisfied an expected $2,000 deficit on the one case where the sign IS the answer;
+      an **`Expectation` asserting nothing scored 100%** (`all([])` is True), so a case whose
+      ground truth came out empty was a free pass; a **crashed run scored 67%**, because the
+      calls made before the crash still satisfied route and budget; and **skipped cases were
+      logged but never returned**, so a warehouse missing four of five marts left one case that
+      could score 100% and satisfy `--min-score`. Every one of these fails in the direction that
+      *hides* problems, which is the only direction that matters in a measurement tool.
+      Also: a NULL in any column past the first raised out of the whole build rather than
+      skipping one case, and `top_merchant` no longer accepts a `run_sql` route, because
+      `silver_merchants.total_outflow` sums outflows with **no `is_transfer` filter** unlike
+      every other mart — so an agent correctly excluding transfers would have been scored wrong.
+      (That mart is worth a second look; noted below.)
+
+      Verified end to end against a real model: **73.3%** with `qwen2.5:3b` — the three
+      curated-tool cases pass all assertions, and both `run_sql`-only cases fail on figure and
+      tool. That independently reproduces, and now quantifies, the model-capability gap found
+      by hand in stage 6. The 0.8 floor is calibrated for the default `qwen3:8b`, so 3B
+      correctly fails the gate. Re-run after the review fixes: 66.7%, the drop being a
+      previously-false pass now caught. Scores vary run to run at 3B — the same question was
+      answered correctly on a later invocation — so a single run is a sample, not a verdict.
 
 - [x] Phase 7 stage 6 — `pf chat`: a Pydantic AI agent over local Ollama, answering from the
       Stage A MCP tools. Stage B of the agent plan.
