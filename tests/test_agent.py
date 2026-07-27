@@ -33,10 +33,10 @@ from personal_finance.agent import (
     AGENT_INSTRUCTIONS,
     MAX_REQUESTS_PER_RUN,
     MAX_TOOL_RETRIES,
+    FinanceAgent,
+    LocalChatModel,
+    WarehouseToolset,
     agent_model_error,
-    build_agent,
-    build_model,
-    build_toolset,
     openai_compatible_base_url,
     tool_server_error,
     usage_limits,
@@ -103,14 +103,14 @@ class TestOllamaBaseUrl:
     def test_maps_onto_openai_compatible_endpoint(self, configured, expected):
         assert openai_compatible_base_url(configured) == expected
 
-    def test_build_model_uses_the_agent_model_setting(self, fresh_settings):
+    def test_model_uses_the_agent_model_setting(self, fresh_settings):
         fresh_settings.setenv("OLLAMA_AGENT_MODEL", "llama3.1:8b")
-        assert build_model().model_name == "llama3.1:8b"
+        assert LocalChatModel().model_name == "llama3.1:8b"
 
-    def test_build_model_honours_an_explicit_override(self, fresh_settings):
+    def test_model_honours_an_explicit_override(self, fresh_settings):
         """`pf chat --model`-style overrides must beat the setting."""
         fresh_settings.setenv("OLLAMA_AGENT_MODEL", "llama3.1:8b")
-        assert build_model("qwen3:14b").model_name == "qwen3:14b"
+        assert LocalChatModel("qwen3:14b").model_name == "qwen3:14b"
 
 
 class TestAgentConstruction:
@@ -126,7 +126,7 @@ class TestAgentConstruction:
             captured["instructions"] = messages[0].instructions
             return ModelResponse(parts=[TextPart("ok")])
 
-        built = build_agent(model=FunctionModel(capture), mcp_client=build_server())
+        built = FinanceAgent(model=FunctionModel(capture), mcp_client=build_server())
         assert isinstance(built, Agent)
         asyncio.run(built.run("hello"))
 
@@ -147,7 +147,7 @@ class TestAgentConstruction:
         developer with no Ollama running should still get help text."""
         fresh_settings.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:1")
         fresh_settings.setenv("MCP_URL", "http://127.0.0.1:1/mcp")
-        build_agent()  # must not raise
+        FinanceAgent()  # must not raise
 
 
 class TestToolCalling:
@@ -168,7 +168,7 @@ class TestToolCalling:
             return ModelResponse(parts=[TextPart("done")])
 
         async def run() -> None:
-            built = build_agent(model=FunctionModel(call_top_merchants), mcp_client=build_server())
+            built = FinanceAgent(model=FunctionModel(call_top_merchants), mcp_client=build_server())
             await built.run("Who do I spend the most with?")
 
         asyncio.run(run())
@@ -206,8 +206,8 @@ class TestToolCalling:
             return ModelResponse(parts=[TextPart(str(messages[-1].parts[-1].content))])
 
         async def run() -> str:
-            built = build_agent(
-                model=FunctionModel(write_bad_sql_then_recover), mcp_client=build_server()
+            built = FinanceAgent(
+                FunctionModel(write_bad_sql_then_recover), mcp_client=build_server()
             )
             return (await built.run("count merchants")).output
 
@@ -249,9 +249,7 @@ class TestToolCalling:
             return ModelResponse(parts=[TextPart(str(messages[-1].parts[-1].content))])
 
         async def run() -> str:
-            built = build_agent(
-                model=FunctionModel(wrong_twice_then_right), mcp_client=build_server()
-            )
+            built = FinanceAgent(FunctionModel(wrong_twice_then_right), mcp_client=build_server())
             return (await built.run("count merchants")).output
 
         output = asyncio.run(run())
@@ -359,7 +357,12 @@ class TestAgUiEndpoint:
     def client(self, warehouse):
         from personal_finance.api import app
 
-        return TestClient(app)
+        # Context-managed on purpose: a bare TestClient(app) never runs the
+        # lifespan, so app.state.agent would not exist and every /agent
+        # request would fail on an AttributeError rather than on anything
+        # this file means to test.
+        with TestClient(app) as test_client:
+            yield test_client
 
     def _run_input(self) -> dict:
         return {
@@ -383,22 +386,20 @@ class TestAgUiEndpoint:
 
     def test_streams_ag_ui_events_for_a_question(self, client, monkeypatch, warehouse):
         """The endpoint answers as an AG-UI event stream, not a JSON body."""
-        # `call_tools=[]`: this test is about AG-UI framing, and TestModel's
-        # default of calling every tool it can see would instead exercise
-        # marts the fixture warehouse deliberately does not have.
-        server = build_server()
-        monkeypatch.setattr(
-            agent_module,
-            "get_agent",
-            lambda: build_agent(model=TestModel(call_tools=[]), mcp_client=server),
-        )
+        from personal_finance.api import app
+
+        # Swapping the agent the lifespan built is the whole benefit of it
+        # living on app.state: one assignment, no patching of module globals.
+        # `call_tools=[]` because this test is about AG-UI framing, and
+        # TestModel's default of calling every tool it can see would instead
+        # exercise marts the fixture warehouse deliberately does not have.
+        app.state.agent = FinanceAgent(TestModel(call_tools=[]), mcp_client=build_server())
 
         # Must be a coroutine function: api.py awaits it.
         async def reachable(_client=None):  # noqa: RUF029
             return None
 
         monkeypatch.setattr("personal_finance.api.tool_server_error", reachable)
-        monkeypatch.setattr("personal_finance.api.get_agent", agent_module.get_agent)
 
         response = client.post("/agent", json=self._run_input())
         assert response.status_code == 200
@@ -437,4 +438,4 @@ class TestChatCommand:
 def test_toolset_reuses_the_servers_own_instructions():
     """The data conventions live next to the tools in mcp_server; restating
     them in AGENT_INSTRUCTIONS would let the two drift apart."""
-    assert build_toolset(build_server()).include_instructions is True
+    assert WarehouseToolset(build_server()).include_instructions is True

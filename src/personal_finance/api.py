@@ -15,6 +15,7 @@ single-user app with no concurrent-writer contention to manage.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import duckdb
@@ -22,7 +23,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from pydantic_ai.ui.ag_ui import AGUIAdapter
 
-from personal_finance.agent import get_agent, tool_server_error, usage_limits
+from personal_finance.agent import FinanceAgent, tool_server_error, usage_limits
 from personal_finance.callouts import CalloutFeed, detect_callouts
 from personal_finance.config import get_settings
 from personal_finance.exceptions import ConfigurationError, NotFoundError
@@ -40,9 +41,27 @@ from personal_finance.user_config import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import AsyncIterator, Generator
 
-app = FastAPI(title="personal-finance API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Build the chat agent once, at startup, and hand it to every request.
+
+    The agent has to outlive a single request: its toolset caches the MCP
+    server's tool list, so constructing one per question would re-fetch that
+    list and re-open the connection every time. Owning it here rather than in
+    a module-level cache means its lifetime is the app's lifetime — visible,
+    and replaceable in a test via ``app.state.agent``.
+
+    Construction opens no connection, so a machine with neither Ollama nor
+    ``pf mcp --http`` running still serves every other endpoint normally.
+    """
+    app.state.agent = FinanceAgent()
+    yield
+
+
+app = FastAPI(title="personal-finance API", version="0.1.0", lifespan=lifespan)
 
 _REVIEW_KINDS: dict[str, EntityKind] = {
     "transaction": EntityKind.TRANSACTION,
@@ -391,5 +410,5 @@ async def agent_endpoint(request: Request) -> Response:
     if unreachable:
         raise HTTPException(status_code=503, detail=unreachable)
     return await AGUIAdapter.dispatch_request(
-        request, agent=get_agent(), usage_limits=usage_limits()
+        request, agent=request.app.state.agent, usage_limits=usage_limits()
     )
