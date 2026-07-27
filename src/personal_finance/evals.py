@@ -32,11 +32,13 @@ deliberately outside the default test run — see ``pf eval`` and the
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai import capture_run_messages
+from pydantic_ai.messages import ToolCallPart
 from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import Evaluator
 
@@ -69,6 +71,11 @@ class AgentAnswer:
 
     text: str
     tools_called: tuple[str, ...]
+    # A run that blew up must fail every assertion, not just the figure one.
+    # `capture_run_messages` still records the calls made before the crash, so
+    # a run that picked the right tool and then died would otherwise satisfy
+    # both route and budget and score 2 of 3 — a total failure reported as 67%.
+    failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,27 +90,81 @@ class Expectation:
     """
 
     amounts: tuple[Decimal, ...] = ()
+    counts: tuple[int, ...] = ()
     phrases: tuple[str, ...] = ()
     tools: frozenset[str] = frozenset()
     tool_budget: int = DEFAULT_TOOL_BUDGET
+    signed: bool = False
+
+    def __post_init__(self) -> None:
+        # `all([])` is True, so an expectation with nothing to check would pass
+        # every answer including gibberish — a free 100% for a case whose
+        # ground-truth derivation silently produced nothing. Refused at
+        # construction so it surfaces as a loud build error rather than as a
+        # suspiciously good score.
+        if not (self.amounts or self.counts or self.phrases):
+            message = "An Expectation must assert at least one amount, count or phrase."
+            raise ValueError(message)
 
 
-def mentions_amount(text: str, amount: Decimal) -> bool:
+_NORMALIZE = str.maketrans({",": "", "$": "", "\u2212": "-"})
+
+# Words that carry the direction of a signed figure when the model writes it
+# out rather than with a minus. "A deficit of $2,000" is the same answer as
+# "-$2,000" and must not be scored as the opposite one.
+_NEGATIVE_WORDS = ("deficit", "negative", "shortfall", "overspent", "in the red")
+
+
+def mentions_amount(text: str, amount: Decimal, *, signed: bool = False) -> bool:
     """Is this money figure present in the answer, however the model wrote it?
 
     Models render money inconsistently — "$18,876.63", "18876.63", "$18,876"
-    are all the same correct answer, and only the last of those is arguably
-    imprecise. Digits are compared after stripping the separators and symbols
-    that carry no information, and a whole-dollar rendering counts: a model
-    that says "about $18,877 on groceries" has got it right, and failing it
-    would train the suite to reward a formatting habit instead of accuracy.
+    are all the same correct answer — so separators are stripped and a
+    whole-dollar rendering counts. What is NOT allowed is matching a *different*
+    number that happens to contain these digits. A bare substring test scored
+    "$91,234.56" as a correct answer to an expected $1,234.56, and "$50.00" as
+    a correct answer to an expected $5.00; for a harness whose whole job is
+    catching wrong figures, that is the one mistake it cannot make. Hence the
+    digit boundaries on both sides.
+
+    ``signed`` is for figures whose sign IS the answer — a net of +$2,000 and
+    one of -$2,000 are opposite claims, not the same magnitude. Left off for
+    outflow totals, where the marts store a negative and the tools and the
+    agent both report a positive magnitude, so a sign check would fail correct
+    answers.
     """
-    haystack = text.replace(",", "").replace("$", "")
+    haystack = text.translate(_NORMALIZE)
     magnitude = abs(amount)
-    return any(
-        rendering in haystack
-        for rendering in (f"{magnitude:.2f}", f"{magnitude:.0f}", str(int(magnitude)))
+    # A trailing "." must block the whole-dollar renderings, or "1234.00" would
+    # satisfy an expected 1234.56 via the truncated "1234".
+    renderings = (
+        (f"{magnitude:.2f}", r"(?![\d])"),
+        (f"{magnitude:.0f}", r"(?![\d.])"),
+        (str(int(magnitude)), r"(?![\d.])"),
     )
+    for rendering, tail in renderings:
+        for match in re.finditer(rf"(?<![\d.]){re.escape(rendering)}{tail}", haystack):
+            if not signed or _reads_as_negative(haystack, match.start(), text) == (amount < 0):
+                return True
+    return False
+
+
+def _reads_as_negative(haystack: str, start: int, text: str) -> bool:
+    """Does the figure at ``start`` read as a negative one?"""
+    if start > 0 and haystack[start - 1] in "-(":
+        return True
+    return any(word in text.lower() for word in _NEGATIVE_WORDS)
+
+
+def mentions_count(text: str, count: int) -> bool:
+    """Is this whole-number count present, and not part of another number?
+
+    Kept apart from :func:`mentions_amount` because counts collide with things
+    money does not: an answer about a merchant routinely contains dates, and
+    "2026-06-30" contains a "30" that has nothing to do with a transaction
+    count. Adjacency to any of ``. , - /`` therefore disqualifies a match.
+    """
+    return re.search(rf"(?<![\d.,\-/]){count}(?![\d.,\-/])", text.translate(_NORMALIZE)) is not None
 
 
 @dataclass
@@ -116,13 +177,15 @@ class ReportsExpectedFigures(Evaluator[str, AgentAnswer, Expectation]):
     """
 
     def evaluate(self, ctx: EvaluatorContext[str, AgentAnswer, Expectation]) -> bool:
-        expected = ctx.metadata
-        if expected is None or ctx.output is None:
+        expected = _require_expectation(ctx)
+        if ctx.output.failed:
             return False
         text = ctx.output.text
-        amounts_present = all(mentions_amount(text, amount) for amount in expected.amounts)
-        phrases_present = all(phrase.lower() in text.lower() for phrase in expected.phrases)
-        return amounts_present and phrases_present
+        return (
+            all(mentions_amount(text, a, signed=expected.signed) for a in expected.amounts)
+            and all(mentions_count(text, c) for c in expected.counts)
+            and all(phrase.lower() in text.lower() for phrase in expected.phrases)
+        )
 
 
 @dataclass
@@ -135,8 +198,8 @@ class UsedAnExpectedTool(Evaluator[str, AgentAnswer, Expectation]):
     """
 
     def evaluate(self, ctx: EvaluatorContext[str, AgentAnswer, Expectation]) -> bool:
-        expected = ctx.metadata
-        if expected is None or ctx.output is None:
+        expected = _require_expectation(ctx)
+        if ctx.output.failed:
             return False
         if not expected.tools:
             return bool(ctx.output.tools_called)
@@ -153,10 +216,24 @@ class WithinToolBudget(Evaluator[str, AgentAnswer, Expectation]):
     """
 
     def evaluate(self, ctx: EvaluatorContext[str, AgentAnswer, Expectation]) -> bool:
-        expected = ctx.metadata
-        if expected is None or ctx.output is None:
+        expected = _require_expectation(ctx)
+        if ctx.output.failed:
             return False
         return len(ctx.output.tools_called) <= expected.tool_budget
+
+
+def _require_expectation(ctx: EvaluatorContext[str, AgentAnswer, Expectation]) -> Expectation:
+    """Fail loudly on a case with no ground truth, rather than scoring it zero.
+
+    A missing expectation is a harness bug, and returning False for it would
+    make it indistinguishable from a model that answered nothing correctly —
+    the same signature as the un-awaited-coroutine bug, where a broken harness
+    read as a total agent failure.
+    """
+    if ctx.metadata is None:
+        message = f"Eval case {ctx.name!r} has no Expectation; its ground truth was never built."
+        raise ValueError(message)
+    return ctx.metadata
 
 
 @dataclass
@@ -187,7 +264,11 @@ class AgentUnderTest:
                 # whole dataset would destroy the run that was measuring it.
                 # The text records the failure so it shows in the report.
                 logger.warning("Eval question failed: %s", question, exc_info=True)
-                text = f"<run failed: {type(exc).__name__}: {exc}>"
+                return AgentAnswer(
+                    text=f"<run failed: {type(exc).__name__}: {exc}>",
+                    tools_called=tool_names(messages),
+                    failed=True,
+                )
         return AgentAnswer(text=text, tools_called=tool_names(messages))
 
 
@@ -198,12 +279,17 @@ def tool_names(messages: Sequence[Any]) -> tuple[str, ...]:
     finding. Read from the message history rather than from a counter inside
     the tools, because the tools live in another process: this module never
     touches the MCP server's code.
+
+    Matched on the imported type rather than on ``type(part).__name__``: a
+    rename upstream would make every tool call invisible, and that surfaces as
+    "the agent used no tools" — a harness break wearing an agent failure's
+    clothes. An import error is the louder, more honest way to find out.
     """
     return tuple(
         part.tool_name
         for message in messages
         for part in getattr(message, "parts", [])
-        if type(part).__name__ == "ToolCallPart"
+        if isinstance(part, ToolCallPart)
     )
 
 
@@ -236,13 +322,30 @@ class _Ground:
         except Exception:
             logger.warning("Eval case %r: ground-truth query failed", label, exc_info=True)
             row = None
-        if row is None or row[0] is None:
+        if row is None or any(value is None for value in row):
+            # Every column, not just the first: `net_amount` is a bare sum and
+            # so is NULL-able, and a NULL reaching Decimal() raises out of
+            # build_dataset entirely — losing every other case to one gap.
             self.missing.append(label)
             return None
         return row
 
 
-def build_dataset(conn: duckdb.DuckDBPyConnection) -> Dataset[str, AgentAnswer, Expectation]:
+@dataclass(frozen=True)
+class EvalPlan:
+    """The cases that could be built, and the ones that could not.
+
+    ``skipped`` is returned rather than only logged because a thin run scores
+    like a clean one: four missing marts leave a single case that can hit 100%
+    and satisfy a ``--min-score`` gate, with the warning buried in log output
+    the CLI never configures a handler for.
+    """
+
+    dataset: Dataset[str, AgentAnswer, Expectation]
+    skipped: tuple[str, ...] = ()
+
+
+def build_plan(conn: duckdb.DuckDBPyConnection) -> EvalPlan:
     """Build the case set, computing every expected value from the warehouse.
 
     Nothing here hardcodes a figure. Regenerating the synth data changes what
@@ -255,7 +358,7 @@ def build_dataset(conn: duckdb.DuckDBPyConnection) -> Dataset[str, AgentAnswer, 
 
     groceries = ground.one(
         "groceries_total",
-        "SELECT total_outflow, transaction_count FROM main_gold.gold_category_rollups "
+        "SELECT total_outflow FROM main_gold.gold_category_rollups "
         "WHERE path = 'essentials/groceries'",
     )
     if groceries:
@@ -283,7 +386,14 @@ def build_dataset(conn: duckdb.DuckDBPyConnection) -> Dataset[str, AgentAnswer, 
                 metadata=Expectation(
                     amounts=(Decimal(merchant[1]),),
                     phrases=(merchant[0],),
-                    tools=frozenset({"top_merchants", "run_sql"}),
+                    # Only the curated tool. `silver_merchants.total_outflow`
+                    # sums outflows with no `is_transfer` filter, unlike every
+                    # other mart — so an agent computing this through run_sql
+                    # and correctly excluding transfers would get a different,
+                    # equally defensible number and be scored wrong. Scoring
+                    # the more correct route as a failure is worse than not
+                    # exercising it here. (The mart itself is worth a look.)
+                    tools=frozenset({"top_merchants"}),
                 ),
             )
         )
@@ -301,6 +411,12 @@ def build_dataset(conn: duckdb.DuckDBPyConnection) -> Dataset[str, AgentAnswer, 
                 metadata=Expectation(
                     amounts=(Decimal(month[1]),),
                     tools=frozenset({"monthly_flow", "run_sql"}),
+                    # The one case where sign carries meaning: a $2,000 surplus
+                    # and a $2,000 deficit are opposite answers, and magnitude
+                    # matching would score them the same. Outflow totals stay
+                    # unsigned, since the marts store a negative there while
+                    # the tools and the agent both report a magnitude.
+                    signed=True,
                 ),
             )
         )
@@ -342,7 +458,7 @@ def build_dataset(conn: duckdb.DuckDBPyConnection) -> Dataset[str, AgentAnswer, 
                     "Which merchant do I have the most separate transactions with, and how many?"
                 ),
                 metadata=Expectation(
-                    amounts=(Decimal(busiest[1]),),
+                    counts=(int(busiest[1]),),
                     phrases=(busiest[0],),
                     tools=frozenset({"top_merchants", "run_sql"}),
                 ),
@@ -355,8 +471,11 @@ def build_dataset(conn: duckdb.DuckDBPyConnection) -> Dataset[str, AgentAnswer, 
             len(ground.missing),
             ", ".join(ground.missing),
         )
-    return Dataset(
-        name="personal-finance chat agent",
-        cases=cases,
-        evaluators=[ReportsExpectedFigures(), UsedAnExpectedTool(), WithinToolBudget()],
+    return EvalPlan(
+        dataset=Dataset(
+            name="personal-finance chat agent",
+            cases=cases,
+            evaluators=[ReportsExpectedFigures(), UsedAnExpectedTool(), WithinToolBudget()],
+        ),
+        skipped=tuple(ground.missing),
     )

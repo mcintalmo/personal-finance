@@ -63,6 +63,17 @@ Phase 6 demo):
       `write_config_file`'s whole-config re-validation as the backend safety net regardless of
       what renders the input widgets.
 
+**Mart consistency** (surfaced by the Phase 7 stage 7 eval review):
+
+- [ ] `silver_merchants.total_outflow` sums outflows with no `is_transfer` filter, unlike
+      `gold_monthly_flow`, `gold_category_rollups` and every other spend mart, all of which
+      exclude transfers between the user's own accounts. So `top_merchants` (and `GET
+      /merchants/top`, and the dashboard's top-merchant panel) can rank a transfer destination
+      as a merchant the user "spent" money with. Found because the eval suite had to drop
+      `run_sql` as an accepted route for its `top_merchant` case: an agent applying the
+      project's own convention would compute a different number and be scored wrong. Decide
+      whether the mart or the convention is right, then make them agree.
+
 **CLI polish** (pre-existing gap, affects both cascades — not scoped to any one phase):
 
 - [ ] `pf transform` hardcodes its dbt `--vars` to only `known_cities`; `embedding_model`/
@@ -112,11 +123,37 @@ Phase 6 demo):
       passing the bound method, and pinned by a test that drives the task through the real
       `Dataset.evaluate` rather than calling it directly.
 
+      **A pre-merge review found the load-bearing assertion was unsound.** `mentions_amount` was
+      a bare unanchored substring test, and ten wrong answers were confirmed scoring as correct:
+      `$91,234.56` satisfied an expected `$1,234.56` (comma-stripping *creates* the collision),
+      `$50.00` satisfied `$5.00` (under $10 the whole-dollar rendering is one character, so the
+      test degenerates to "contains a 5"), and a count of 30 matched the `30` inside a date. For
+      a harness whose only job is catching wrong figures, that made every number it reported
+      meaningless — and the rejection tests were vacuous against it, since all three wrong values
+      differed in their leading digit. Now anchored on digit boundaries, with counts matched
+      separately from money because counts collide with dates and years in a way money does not.
+
+      Four more of the same class, each fixed and pinned: **sign was discarded**, so a $2,000
+      surplus satisfied an expected $2,000 deficit on the one case where the sign IS the answer;
+      an **`Expectation` asserting nothing scored 100%** (`all([])` is True), so a case whose
+      ground truth came out empty was a free pass; a **crashed run scored 67%**, because the
+      calls made before the crash still satisfied route and budget; and **skipped cases were
+      logged but never returned**, so a warehouse missing four of five marts left one case that
+      could score 100% and satisfy `--min-score`. Every one of these fails in the direction that
+      *hides* problems, which is the only direction that matters in a measurement tool.
+      Also: a NULL in any column past the first raised out of the whole build rather than
+      skipping one case, and `top_merchant` no longer accepts a `run_sql` route, because
+      `silver_merchants.total_outflow` sums outflows with **no `is_transfer` filter** unlike
+      every other mart — so an agent correctly excluding transfers would have been scored wrong.
+      (That mart is worth a second look; noted below.)
+
       Verified end to end against a real model: **73.3%** with `qwen2.5:3b` — the three
       curated-tool cases pass all assertions, and both `run_sql`-only cases fail on figure and
       tool. That independently reproduces, and now quantifies, the model-capability gap found
       by hand in stage 6. The 0.8 floor is calibrated for the default `qwen3:8b`, so 3B
-      correctly fails the gate.
+      correctly fails the gate. Re-run after the review fixes: 66.7%, the drop being a
+      previously-false pass now caught. Scores vary run to run at 3B — the same question was
+      answered correctly on a later invocation — so a single run is a sample, not a verdict.
 
 - [x] Phase 7 stage 6 — `pf chat`: a Pydantic AI agent over local Ollama, answering from the
       Stage A MCP tools. Stage B of the agent plan.

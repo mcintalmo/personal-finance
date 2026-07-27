@@ -272,7 +272,7 @@ def run_eval(
     rather than part of `pytest`.
     """
     from personal_finance.agent import FinanceAgent, agent_model_error, tool_server_error
-    from personal_finance.evals import AgentUnderTest, build_dataset, pass_rate
+    from personal_finance.evals import AgentUnderTest, build_plan, pass_rate
 
     for problem in (agent_model_error(), asyncio.run(tool_server_error())):
         if problem:
@@ -281,7 +281,8 @@ def run_eval(
 
     settings = get_settings()
     with duckdb.connect(str(settings.data.warehouse_path), read_only=True) as conn:
-        dataset = build_dataset(conn)
+        plan = build_plan(conn)
+    dataset = plan.dataset
     if not dataset.cases:
         typer.echo(
             "No eval cases could be built — the gold/silver marts are empty. "
@@ -290,6 +291,15 @@ def run_eval(
         )
         raise typer.Exit(code=1)
 
+    if plan.skipped:
+        # Loudly, on stderr: a run of one surviving case can score 100% and
+        # satisfy --min-score, so a thin run must not read like a clean one.
+        typer.echo(
+            f"WARNING: skipped {len(plan.skipped)} case(s) with no data in the warehouse "
+            f"({', '.join(plan.skipped)}). Run `pf ingest`, `pf transform` and `pf forecast` "
+            "for the full suite.",
+            err=True,
+        )
     typer.echo(f"Scoring {len(dataset.cases)} case(s) against {settings.ollama.agent_model}...")
 
     async def _run() -> None:
