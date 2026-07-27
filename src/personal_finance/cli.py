@@ -18,8 +18,10 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
     pf forecast    project the next few months of spend/income into the forecasts table
     pf callouts    show what changed: spending spikes, trends, and budgets at risk
     pf mcp         serve the warehouse to AI agents as read-only MCP tools
+    pf chat        ask questions in a browser, answered from the MCP tools
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -191,10 +193,11 @@ def mcp(
     friends) launch. Use `--http` for an agent running inside this project.
 
     Everything it exposes is read-only, enforced by DuckDB rather than by
-    inspecting SQL: the warehouse is opened `read_only=True`, external file
-    access is disabled, and the only re-permitted path is the bronze landing
-    zone the silver views need. Neither a tool nor a model-authored query can
-    modify data or read files outside it.
+    inspecting SQL: the warehouse is opened `read_only=True` and external file
+    access is disabled outright — no directory is allow-listed, because the
+    silver layer is materialized and so nothing in the warehouse reads from
+    disk. Neither a tool nor a model-authored query can modify data or read
+    any file.
     """
     from personal_finance.mcp_server import build_server
 
@@ -218,6 +221,36 @@ def mcp(
         # stdio is the transport: nothing may write to stdout except the
         # protocol itself, so this deliberately prints no banner.
         server.run(transport="stdio", show_banner=False)
+
+
+@app.command()
+def chat(
+    host: str = typer.Option("127.0.0.1", help="Bind address for the chat UI."),
+    port: int = typer.Option(8002, help="Bind port for the chat UI."),
+) -> None:
+    """Chat with the warehouse in a browser, using Pydantic AI's built-in web UI.
+
+    Needs a running `pf mcp --http`: the agent gets every figure from the tool
+    server and holds no database handle of its own. It does NOT need
+    `pf serve` — that mounts the same agent at POST /agent over AG-UI, for a
+    frontend to drive; this is the standalone equivalent for using it directly.
+
+    Both prerequisites are checked here rather than on the first question,
+    because "the model isn't pulled" and "the tool server is down" are both
+    much cheaper to read as a startup message than as a failure halfway
+    through a streamed answer.
+    """
+    import uvicorn
+
+    from personal_finance.agent import agent_model_error, get_agent, tool_server_error
+
+    for problem in (agent_model_error(), asyncio.run(tool_server_error())):
+        if problem:
+            typer.echo(problem, err=True)
+            raise typer.Exit(code=1)
+
+    typer.echo(f"Chat UI on http://{host}:{port} — tools from {get_settings().mcp.url}")
+    uvicorn.run(get_agent().to_web(), host=host, port=port)
 
 
 @app.command()

@@ -18,9 +18,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import duckdb
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
+from pydantic_ai.ui.ag_ui import AGUIAdapter
 
+from personal_finance.agent import get_agent, tool_server_error, usage_limits
 from personal_finance.callouts import CalloutFeed, detect_callouts
 from personal_finance.config import get_settings
 from personal_finance.exceptions import ConfigurationError, NotFoundError
@@ -367,3 +369,27 @@ def put_config_file(name: str, request: ConfigFile) -> ConfigFile:
     except ConfigurationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ConfigFile(name=name, content=request.content)
+
+
+# ── Chat agent (AG-UI) ──────────────────────────────────────
+# Mounted here so a client has one backend address for both the dashboard
+# queries above and the conversation, rather than two. The agent itself holds
+# no database handle: it reads the warehouse only through the out-of-process
+# MCP tool server. See personal_finance.agent for why that separation is
+# required rather than merely tidy.
+
+
+@app.post("/agent")
+async def agent_endpoint(request: Request) -> Response:
+    """AG-UI endpoint for the chat agent — a streamed run, not a JSON reply.
+
+    Deliberately not declared with a response model: the body is an AG-UI
+    event stream (text deltas, tool calls, tool results), which
+    ``AGUIAdapter`` writes directly.
+    """
+    unreachable = await tool_server_error()
+    if unreachable:
+        raise HTTPException(status_code=503, detail=unreachable)
+    return await AGUIAdapter.dispatch_request(
+        request, agent=get_agent(), usage_limits=usage_limits()
+    )

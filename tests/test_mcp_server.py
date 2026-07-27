@@ -24,6 +24,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+from personal_finance import mcp_server
 from personal_finance.config import get_settings
 from personal_finance.mcp_server import build_server, readonly_connection
 
@@ -35,8 +36,10 @@ if TYPE_CHECKING:
 def warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A minimal warehouse with just enough shape to query."""
     path = tmp_path / "warehouse.duckdb"
-    # A parquet-backed view mirroring the real silver layer, which is dbt
-    # *views* over the bronze landing zone rather than materialized tables.
+    # A populated bronze landing zone. Silver is materialized (see
+    # transform/dbt_project.yml), so nothing here reads from it — it exists
+    # purely as a write TARGET for the injection tests below, which assert
+    # that `COPY ... TO '<bronze>/x.parquet'` cannot land a file in it.
     bronze = tmp_path / "bronze"
     bronze.mkdir()
     with duckdb.connect() as writer:
@@ -375,6 +378,63 @@ class TestRunSql:
         the most useful thing to hand back — not a generic failure."""
         with pytest.raises(ToolError, match="Query failed"):
             call("run_sql", query="SELECT FROM WHERE")
+
+    def test_a_syntax_error_does_not_dump_the_schema(self, warehouse: Path) -> None:
+        """The schema hint is for guessed *names*. Attaching it to every
+        failure would bury the parser's message — the one thing that actually
+        locates a syntax error — under a wall of table names."""
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT FROM WHERE")
+        assert "has columns" not in str(caught.value)
+        assert "queryable tables are" not in str(caught.value)
+
+    def test_a_guessed_table_name_is_answered_with_the_real_ones(self, warehouse: Path) -> None:
+        """Observed live: given only DuckDB's message, a model resent the
+        identical query until its retry budget was gone. DuckDB's own "Did you
+        mean" makes it worse, suggesting names from attached databases that
+        this tool cannot query. The server knows the real names, so it says
+        them."""
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT * FROM main_silver.transactions")
+        message = str(caught.value)
+        assert "Do not resend this query unchanged" in message
+        assert "main_silver.silver_transactions" in message
+        assert "main_gold.gold_monthly_flow" in message
+
+    def test_a_failing_schema_hint_does_not_replace_the_models_real_error(
+        self, warehouse: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hint is built inside an exception handler, so anything it
+        raises would surface INSTEAD of the SQL error the model needs to see —
+        losing the only message that says what was actually wrong."""
+
+        def exploding_tables(_conn: object) -> list[str]:
+            raise duckdb.InterruptException("interrupted mid-hint")
+
+        monkeypatch.setattr(mcp_server, "_qualified_tables", exploding_tables)
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT * FROM main_silver.transactions")
+        message = str(caught.value)
+        # The model's actual error survived.
+        assert "does not exist" in message
+        # And it still gets pointed somewhere useful.
+        assert "list_tables" in message
+
+    def test_a_guessed_column_name_is_answered_with_that_tables_columns(
+        self, warehouse: Path
+    ) -> None:
+        """The follow-on failure once the table name is right. Sending the
+        model to `describe_table` would cost a whole round trip for something
+        the server can answer immediately."""
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT outflow_amount FROM main_silver.silver_transactions")
+        message = str(caught.value)
+        assert "main_silver.silver_transactions has columns:" in message
+        assert "merchant_name" in message
+        assert "posted_on" in message
+        # Only the table the query actually named — dumping every table's
+        # columns would drown the relevant one.
+        assert "gold_monthly_flow has columns" not in message
 
 
 class TestSchemaDiscovery:
