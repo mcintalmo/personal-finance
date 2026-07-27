@@ -17,6 +17,7 @@ dependencies = [
     "plotly>=6.9.0",
     "pydantic>=2.13.4",
     "pydantic-ai-slim[ag-ui,mcp,openai,ui]>=2.13.0",
+    "pydantic-evals>=2.13.0",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
     "scipy>=1.18.0",
@@ -185,6 +186,15 @@ addopts = [
     # exactly once, and the parallelism comes from running whole files at once.
     "-n=auto",
     "--dist=loadfile",
+    # Integration tests need live external services (Ollama, `pf mcp --http`)
+    # that neither CI nor a fresh checkout has, so they are deselected here
+    # rather than left to fail confusingly. Run them with `pytest -m
+    # integration`, which overrides this.
+    "-m",
+    "not integration",
+]
+markers = [
+    "integration: needs live external services (Ollama, `pf mcp --http`); deselected by default",
 ]
 filterwarnings = [
     "error",               # treat warnings as errors (remove if too strict)

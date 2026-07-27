@@ -77,6 +77,47 @@ Phase 6 demo):
 
 ## Done
 
+- [x] Phase 7 stage 7 — `pf eval`: a pydantic-evals suite scoring the chat agent.
+
+      **The unit tests are structurally blind to the thing that matters.** They drive a
+      `FunctionModel` that writes correct SQL by construction, so every defect found by running
+      Stage B by hand — a guessed table name, an identical query resent until the retry budget
+      was gone, giving up after discovering the schema — was invisible to them. This closes that
+      gap, and it is also the only test of `AGENT_INSTRUCTIONS` and the tool docstrings, which
+      nothing else covers.
+
+      **Exact figures, no LLM judge.** Most eval suites need a judge because "was that answer
+      good?" is subjective, inheriting the judge's noise and cost. Here the ground truth is in
+      the warehouse, so every case computes its expected value by querying the marts at build
+      time. Deterministic, free, and self-updating — regenerate the synth data and the cases
+      still assert the truth rather than a figure baked in the day they were written. Five
+      cases; two are answerable only through `run_sql`, which is what separates an agent that
+      can analyse from one that reads the tables the dashboard already shows.
+
+      Cases also pin **how** the answer was reached — which tool, and how many calls — as a
+      separate assertion from correctness. A right figure produced on the twelfth `run_sql`
+      attempt is a passing answer and a failing agent; merging the two would hide the signal.
+
+      Two entry points over one dataset: `pf eval` for the scoreboard (and model comparison),
+      and an `@pytest.mark.integration` gate asserting a pass-rate floor. The `integration`
+      marker is registered and deselected via `addopts`, so CI — which has no Ollama — never
+      sees it.
+
+      **Running it immediately found a bug the unit tests missed, of exactly the kind this
+      suite exists to catch.** `AgentUnderTest` was a callable object with an async `__call__`;
+      pydantic-evals decides whether to await via `inspect.iscoroutinefunction`, which is False
+      for an instance (it inspects the object, not `type(obj).__call__`). Every case scored 0%
+      against an un-awaited coroutine — and the report read as a total *agent* failure rather
+      than a broken harness. The unit test passed because it awaited the task by hand. Fixed by
+      passing the bound method, and pinned by a test that drives the task through the real
+      `Dataset.evaluate` rather than calling it directly.
+
+      Verified end to end against a real model: **73.3%** with `qwen2.5:3b` — the three
+      curated-tool cases pass all assertions, and both `run_sql`-only cases fail on figure and
+      tool. That independently reproduces, and now quantifies, the model-capability gap found
+      by hand in stage 6. The 0.8 floor is calibrated for the default `qwen3:8b`, so 3B
+      correctly fails the gate.
+
 - [x] Phase 7 stage 6 — `pf chat`: a Pydantic AI agent over local Ollama, answering from the
       Stage A MCP tools. Stage B of the agent plan.
 
