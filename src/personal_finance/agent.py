@@ -29,7 +29,6 @@ reliable function calling and a much larger context.
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -105,58 +104,75 @@ def openai_compatible_base_url(base_url: str) -> str:
     return trimmed if trimmed.endswith("/v1") else f"{trimmed}/v1"
 
 
-def build_model(model_name: str | None = None) -> OllamaModel:
-    """Build the Ollama-backed model the agent runs on."""
-    settings = get_settings().ollama
-    return OllamaModel(
-        model_name or settings.agent_model,
-        provider=OllamaProvider(base_url=openai_compatible_base_url(settings.base_url)),
-    )
+class LocalChatModel(OllamaModel):
+    """The local Ollama model the agent runs on.
+
+    Exists to bind :class:`~pydantic_ai.models.ollama.OllamaModel` to this
+    project's settings — the model name and the OpenAI-compatible base URL —
+    so no caller has to know that pairing.
+    """
+
+    def __init__(self, model_name: str | None = None) -> None:
+        settings = get_settings().ollama
+        super().__init__(
+            model_name or settings.agent_model,
+            provider=OllamaProvider(base_url=openai_compatible_base_url(settings.base_url)),
+        )
 
 
-def build_toolset(client: Any | None = None) -> MCPToolset:
-    """Build the MCP toolset the agent draws every tool from.
+class WarehouseToolset(MCPToolset):
+    """Every tool the agent has, served by the out-of-process MCP server.
 
     ``client`` accepts anything FastMCP can build a transport from; tests pass
     a :class:`~fastmcp.FastMCP` server instance to run the real tools in
     process without an HTTP server. It defaults to ``settings.mcp.url``, the
     out-of-process ``pf mcp --http``.
     """
-    return MCPToolset(
-        client if client is not None else get_settings().mcp.url,
-        # Reuse the server's own instructions rather than restating the data
-        # conventions here. They live next to the tools they describe, so they
-        # cannot drift out of sync with them.
-        include_instructions=True,
-        # The default, named for the reader: a ToolError becomes a ModelRetry,
-        # so a model that writes invalid SQL sees DuckDB's own message and can
-        # correct it. That round trip is the point of handing back the real
-        # error in mcp_server rather than a sanitized one.
-        tool_error_behavior="retry",
-    )
+
+    def __init__(self, client: Any | None = None) -> None:
+        super().__init__(
+            client if client is not None else get_settings().mcp.url,
+            # Reuse the server's own instructions rather than restating the data
+            # conventions here. They live next to the tools they describe, so they
+            # cannot drift out of sync with them.
+            include_instructions=True,
+            # The default, named for the reader: a ToolError becomes a ModelRetry,
+            # so a model that writes invalid SQL sees DuckDB's own message and can
+            # correct it. That round trip is the point of handing back the real
+            # error in mcp_server rather than a sanitized one.
+            tool_error_behavior="retry",
+        )
 
 
-def build_agent(
-    *, model: Model | str | None = None, mcp_client: Any | None = None
-) -> Agent[None, str]:
-    """Construct the chat agent.
+class FinanceAgent(Agent[None, str]):
+    """The chat agent: a local model, and tools that are its only data access.
 
-    A factory rather than a module-level singleton, matching
-    :func:`personal_finance.mcp_server.build_server`: importing this module
-    must not require a reachable Ollama or tool server. Tests inject a
-    ``TestModel``/``FunctionModel`` and an in-process tool server.
+    Constructing one requires neither a reachable Ollama nor a running tool
+    server — nothing here opens a connection until the agent is actually run.
+    That is what lets ``pf --help`` and ``import personal_finance.api`` work on
+    a machine with neither running.
+
+    Tests inject a ``TestModel``/``FunctionModel`` and an in-process tool
+    server through the two arguments.
     """
-    return Agent(
-        model if model is not None else build_model(),
-        instructions=AGENT_INSTRUCTIONS,
-        toolsets=[build_toolset(mcp_client)],
-        retries=MAX_TOOL_RETRIES,
-    )
+
+    def __init__(self, model: Model | str | None = None, mcp_client: Any | None = None) -> None:
+        super().__init__(
+            model if model is not None else LocalChatModel(),
+            instructions=AGENT_INSTRUCTIONS,
+            toolsets=[WarehouseToolset(mcp_client)],
+            retries=MAX_TOOL_RETRIES,
+        )
 
 
 def usage_limits() -> UsageLimits:
-    """Bound a single question, so a tool loop cannot run away. See
-    :data:`MAX_REQUESTS_PER_RUN`."""
+    """Bound a single question, so a tool loop cannot run away.
+
+    A function rather than a shared constant because ``UsageLimits`` is a
+    mutable dataclass: one instance handed to every run would let any
+    accidental mutation leak into the next conversation. See
+    :data:`MAX_REQUESTS_PER_RUN`.
+    """
     return UsageLimits(request_limit=MAX_REQUESTS_PER_RUN)
 
 
@@ -211,7 +227,7 @@ async def tool_server_error(client: Any | None = None) -> str | None:
     failed" — true, but it names neither the server that is down nor the
     command that starts it.
 
-    ``client`` takes the same shapes as :func:`build_toolset`, so a test can
+    ``client`` takes the same shapes as :class:`WarehouseToolset`, so a test can
     check the reachable path against an in-process server.
     """
     url = get_settings().mcp.url
@@ -226,16 +242,3 @@ async def tool_server_error(client: Any | None = None) -> str | None:
             "`pf mcp --http` (it must be a separate process from `pf serve`)."
         )
     return None
-
-
-@lru_cache
-def get_agent() -> Agent[None, str]:
-    """Return a cached agent, mirroring :func:`~personal_finance.config.get_settings`.
-
-    Cached because the toolset caches the server's tool list across runs, and
-    rebuilding per request would re-fetch it and re-open the connection every
-    time. Long-lived servers (``pf serve``, ``pf chat``) should use this;
-    tests should call :func:`build_agent` so they do not share async state
-    across event loops.
-    """
-    return build_agent()

@@ -242,7 +242,7 @@ def chat(
     """
     import uvicorn
 
-    from personal_finance.agent import agent_model_error, get_agent, tool_server_error
+    from personal_finance.agent import FinanceAgent, agent_model_error, tool_server_error
 
     for problem in (agent_model_error(), asyncio.run(tool_server_error())):
         if problem:
@@ -250,7 +250,7 @@ def chat(
             raise typer.Exit(code=1)
 
     typer.echo(f"Chat UI on http://{host}:{port} — tools from {get_settings().mcp.url}")
-    uvicorn.run(get_agent().to_web(), host=host, port=port)
+    uvicorn.run(FinanceAgent().to_web(), host=host, port=port)
 
 
 @app.command()

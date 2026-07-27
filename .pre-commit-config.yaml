@@ -28,7 +28,13 @@ repos:
 
   # ── Ruff: lint + format (replaces black, isort, flake8) ───
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.0
+    # Keep in step with the ruff in [dependency-groups].dev — CI runs that one
+    # (`uv run ruff check .`), so a drifting pin makes the hook and CI enforce
+    # different rules. v0.15.0 raised a false RUF029 on @asynccontextmanager
+    # async generators, which the project's ruff does not, leaving no source
+    # state that satisfies both: the suppression the hook demanded was itself
+    # an unused-noqa (RUF100) error to CI.
+    rev: v0.15.20
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
