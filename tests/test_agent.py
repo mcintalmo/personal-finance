@@ -324,6 +324,24 @@ class TestAgentModelAvailability:
         assert message is not None
         assert "ollama serve" in message
 
+    def test_an_odd_payload_is_not_reported_as_ollama_being_down(self, fresh_settings):
+        """Ollama answered — so telling someone to check `ollama serve` sends
+        them to restart a server that just replied. The two failures have
+        different fixes and must read differently."""
+
+        def fake_get(url, **kwargs):
+            # `name` renamed upstream: reachable, but unreadable.
+            return httpx.Response(
+                200,
+                json={"models": [{"model": "qwen3:8b"}]},
+                request=httpx.Request("GET", url),
+            )
+
+        fresh_settings.setattr(agent_module.httpx, "get", fake_get)
+        message = agent_model_error() or ""
+        assert "unexpected shape" in message
+        assert "ollama serve" not in message
+
     def test_survives_a_malformed_tags_payload(self, fresh_settings):
         """A shape change upstream must not crash `pf chat` with a KeyError."""
 

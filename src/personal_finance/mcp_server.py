@@ -178,6 +178,20 @@ def _schema_hint(conn: duckdb.DuckDBPyConnection, query: str) -> str:
     add a way to be wrong. If nothing matches, the table list is the right
     answer instead, because the model is not yet aiming at anything real.
     """
+    try:
+        return _describe_mentioned(conn, query)
+    except duckdb.Error:
+        # This runs inside an exception handler, so anything raised here would
+        # replace the model's actual SQL error with an unrelated one — losing
+        # the only message that says what went wrong. The hint is a nicety; the
+        # original error is not. The timeout timer is also still armed at this
+        # point (it is cancelled in the caller's `finally`, which runs after
+        # this), so an interrupt landing here is reachable, if narrowly.
+        logger.warning("Could not build a schema hint for a failed query", exc_info=True)
+        return "Call list_tables and describe_table for the real names before retrying."
+
+
+def _describe_mentioned(conn: duckdb.DuckDBPyConnection, query: str) -> str:
     lowered = query.lower()
     described = []
     for qualified in _qualified_tables(conn):

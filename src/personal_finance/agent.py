@@ -174,12 +174,23 @@ def agent_model_error() -> str | None:
     try:
         response = httpx.get(f"{settings.base_url.rstrip('/')}/api/tags", timeout=5.0)
         response.raise_for_status()
-        installed = {model["name"] for model in response.json().get("models", [])}
-    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+    except httpx.HTTPError as exc:
         logger.warning("Could not list Ollama models at %s: %s", settings.base_url, exc)
         return (
             f"Could not reach Ollama at {settings.base_url} to check for "
             f"{wanted!r} — is `ollama serve` running?"
+        )
+    # Kept separate from the transport failure above. Folding the two together
+    # would answer a *payload* problem — Ollama answering in a shape this does
+    # not expect — with "is `ollama serve` running?", sending someone to
+    # restart a server that just replied to them.
+    try:
+        installed = {model["name"] for model in response.json().get("models", [])}
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("Unexpected /api/tags payload from %s: %s", settings.base_url, exc)
+        return (
+            f"Ollama at {settings.base_url} answered /api/tags in an unexpected shape, so "
+            f"whether {wanted!r} is pulled could not be determined. Check `ollama list`."
         )
     if candidates.isdisjoint(installed):
         return (

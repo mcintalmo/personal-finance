@@ -24,6 +24,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+from personal_finance import mcp_server
 from personal_finance.config import get_settings
 from personal_finance.mcp_server import build_server, readonly_connection
 
@@ -35,8 +36,10 @@ if TYPE_CHECKING:
 def warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A minimal warehouse with just enough shape to query."""
     path = tmp_path / "warehouse.duckdb"
-    # A parquet-backed view mirroring the real silver layer, which is dbt
-    # *views* over the bronze landing zone rather than materialized tables.
+    # A populated bronze landing zone. Silver is materialized (see
+    # transform/dbt_project.yml), so nothing here reads from it — it exists
+    # purely as a write TARGET for the injection tests below, which assert
+    # that `COPY ... TO '<bronze>/x.parquet'` cannot land a file in it.
     bronze = tmp_path / "bronze"
     bronze.mkdir()
     with duckdb.connect() as writer:
@@ -397,6 +400,25 @@ class TestRunSql:
         assert "Do not resend this query unchanged" in message
         assert "main_silver.silver_transactions" in message
         assert "main_gold.gold_monthly_flow" in message
+
+    def test_a_failing_schema_hint_does_not_replace_the_models_real_error(
+        self, warehouse: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hint is built inside an exception handler, so anything it
+        raises would surface INSTEAD of the SQL error the model needs to see —
+        losing the only message that says what was actually wrong."""
+
+        def exploding_tables(_conn: object) -> list[str]:
+            raise duckdb.InterruptException("interrupted mid-hint")
+
+        monkeypatch.setattr(mcp_server, "_qualified_tables", exploding_tables)
+        with pytest.raises(ToolError) as caught:
+            call("run_sql", query="SELECT * FROM main_silver.transactions")
+        message = str(caught.value)
+        # The model's actual error survived.
+        assert "does not exist" in message
+        # And it still gets pointed somewhere useful.
+        assert "list_tables" in message
 
     def test_a_guessed_column_name_is_answered_with_that_tables_columns(
         self, warehouse: Path
