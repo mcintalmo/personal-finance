@@ -3,10 +3,11 @@
 This is a thin query layer, not a business-logic layer: every response
 either projects a gold/silver dbt model directly, or reuses an existing
 module (`personal_finance.review`, `personal_finance.user_config`) that
-already encapsulates the relevant logic for the CLI. The Streamlit app
-(`personal_finance.webapp`) is the only intended consumer, but the contract
-is a plain HTTP API so any client (a future React UI, per
-docs/ARCHITECTURE.md) can use it unchanged.
+already encapsulates the relevant logic for the CLI. The Dash app
+(`personal_finance.dashboard`) is the intended consumer, but the contract is
+a plain HTTP API so any client — a future React UI, per
+docs/ARCHITECTURE.md — can use it unchanged. The chat agent is the second
+consumer, over `POST /agent`.
 
 Every endpoint opens a short-lived DuckDB connection (the same pattern the
 `pf` CLI already uses) and closes it before returning — this is a local,
