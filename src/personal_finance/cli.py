@@ -25,8 +25,6 @@ Commands mirror the pipeline stages (docs/ARCHITECTURE.md):
 import asyncio
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -322,28 +320,36 @@ def run_eval(
 
 @app.command()
 def dashboard(
-    api_url: str = typer.Option(
+    host: str = typer.Option("127.0.0.1", help="Bind address for the dashboard."),
+    port: int = typer.Option(8050, help="Bind port for the dashboard."),
+    api_url: str | None = typer.Option(
         None, help="Base URL of a running `pf serve` (default: Settings.serving.api_url)."
     ),
-    port: int = typer.Option(8501, help="Bind port for the Streamlit app."),
+    debug: bool = typer.Option(False, help="Dash debug mode (hot reload, error overlay)."),
 ) -> None:
-    """Run the Streamlit dashboard (personal_finance.webapp) against a running `pf serve`."""
-    webapp_main = Path(__file__).parent / "webapp" / "Overview.py"
-    env = os.environ.copy()
-    env["PF_API_URL"] = api_url or get_settings().serving.api_url
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            str(webapp_main),
-            "--server.port",
-            str(port),
-        ],
-        env=env,
-        check=True,
+    """Run the Dash dashboard (personal_finance.dashboard) against a running `pf serve`.
+
+    Eight pages, including a Chat page that streams the agent's answer token
+    by token. That page additionally needs `pf mcp --http`, since the agent
+    reads the warehouse only through the MCP tool server.
+
+    Dash rather than Streamlit because the chat page needs the server to push
+    into a live page while a callback is still running, which Streamlit's
+    re-run-the-script model cannot express.
+    """
+    if api_url:
+        os.environ["PF_API_URL"] = api_url
+
+    import uvicorn
+
+    typer.echo(
+        f"Dashboard on http://{host}:{port} — API at {api_url or get_settings().serving.api_url}"
     )
+    # uvicorn on the Dash app's own ASGI server, by import string, exactly as
+    # `pf serve` does. Dash's `app.run()` derives that import string from its
+    # *calling* module, which here is this CLI — so it tries to import
+    # `personal_finance.cli:dash_app.server` and fails.
+    uvicorn.run("personal_finance.dashboard.app:server", host=host, port=port, reload=debug)
 
 
 @app.command()
