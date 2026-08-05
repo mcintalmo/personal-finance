@@ -11,11 +11,19 @@ from __future__ import annotations
 from typing import Any
 
 import dash
+import dash_ag_grid as dag
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, callback, dash_table, dcc, html
+from dash import Input, Output, State, callback, dcc, html, no_update
 
 from personal_finance.dashboard._client import ApiError, get, post
-from personal_finance.dashboard.components import empty_state, error_alert, page_header
+from personal_finance.dashboard.components import (
+    GRID_CLASS,
+    GRID_DEFAULTS,
+    GRID_STYLE,
+    empty_state,
+    error_alert,
+    page_header,
+)
 from personal_finance.dashboard.theme import ink
 
 dash.register_page(__name__, path="/review", name="Review queue", icon="bi-check2-square", order=5)
@@ -60,6 +68,13 @@ def layout(**_kwargs: Any) -> html.Div:
             html.Div(id="review-body"),
             html.Div(id="review-form", className="mt-4"),
             html.Div(id="review-result", className="mt-3"),
+            # Bumped only on a SUCCESSFUL label. The form lives inside
+            # `review-form`, so anything that rebuilds it clears the user's
+            # selections — and rebuilding on every outcome meant "pick a
+            # category" also wiped the item they had already picked, and a
+            # failed POST cost them the whole entry exactly when retrying
+            # mattered most.
+            dcc.Store(id="review-labeled", data=0),
         ]
     )
 
@@ -69,9 +84,9 @@ def layout(**_kwargs: Any) -> html.Div:
     Output("review-form", "children"),
     Input("review-kind", "value"),
     Input("review-limit", "value"),
-    Input("review-result", "children"),
+    Input("review-labeled", "data"),
 )
-def render(kind: str, limit: int, _after_label: Any) -> tuple[Any, Any]:
+def render(kind: str, limit: int, _labeled: int) -> tuple[Any, Any]:
     """Re-reads the queue whenever a label lands, so the item just handled leaves."""
     try:
         queue = get("/review/queue", kind=kind, limit=limit)
@@ -84,29 +99,18 @@ def render(kind: str, limit: int, _after_label: Any) -> tuple[Any, Any]:
     # Columns are derived from the first row: the two queue kinds return
     # different shapes, and a hardcoded list would silently drop a column
     # when either changes.
-    columns: list[Any] = [{"name": k.replace("_", " ").title(), "id": k} for k in queue[0]]
-    table = dash_table.DataTable(
-        data=queue,
-        columns=columns,
-        page_size=10,
-        style_as_list_view=True,
-        style_cell={
-            "fontFamily": "system-ui, sans-serif",
-            "fontSize": 13,
-            "border": "none",
-            "textAlign": "left",
-            "maxWidth": "20rem",
-            "overflow": "hidden",
-            "textOverflow": "ellipsis",
-        },
-        style_data={"borderBottom": f"1px solid {_INK['grid']}"},
-        style_header={
-            "backgroundColor": _INK["surface"],
-            "color": _INK["muted"],
-            "border": "none",
-            "textTransform": "uppercase",
-            "fontSize": 11,
-        },
+    # Columns are derived from the first row: the two queue kinds return
+    # different shapes, and a hardcoded list would silently drop a column when
+    # either changes.
+    table = dag.AgGrid(
+        rowData=queue,
+        columnDefs=[
+            {"headerName": key.replace("_", " ").title(), "field": key} for key in queue[0]
+        ],
+        defaultColDef=GRID_DEFAULTS,
+        className=GRID_CLASS,
+        style=GRID_STYLE,
+        dashGridOptions={"pagination": True, "paginationPageSize": 10},
     )
 
     form = dbc.Card(
@@ -164,16 +168,25 @@ def _category_paths() -> list[str]:
 
 @callback(
     Output("review-result", "children"),
+    Output("review-labeled", "data"),
     Input("review-submit", "n_clicks"),
     State("review-kind", "value"),
     State("review-subject", "value"),
     State("review-category", "value"),
     State("review-note", "value"),
+    State("review-labeled", "data"),
     prevent_initial_call=True,
 )
-def submit(_clicks: int, kind: str, subject_id: str, category: str, note: str | None) -> Any:
+def submit(
+    _clicks: int,
+    kind: str,
+    subject_id: str,
+    category: str,
+    note: str | None,
+    labeled: int,
+) -> tuple[Any, Any]:
     if not subject_id or not category:
-        return dbc.Alert("Pick both an item and a category.", color="warning")
+        return dbc.Alert("Pick both an item and a category.", color="warning"), no_update
     try:
         result = post(
             "/review/label",
@@ -185,7 +198,8 @@ def submit(_clicks: int, kind: str, subject_id: str, category: str, note: str | 
             },
         )
     except ApiError as exc:
-        return error_alert(exc)
-    return dbc.Alert(
-        f"Labeled {result['subject_id']} → {category}.", color="success", duration=6000
+        return error_alert(exc), no_update
+    return (
+        dbc.Alert(f"Labeled {result['subject_id']} → {category}.", color="success", duration=6000),
+        (labeled or 0) + 1,
     )

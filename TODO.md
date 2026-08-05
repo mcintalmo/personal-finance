@@ -57,11 +57,10 @@ Phase 6 demo):
       (`llm_categorize.fetch_category_paths`), with an "add new category" affordance — no manual
       ID entry.
 - [ ] Config editor as structured per-field forms (select/number/list add-delete) instead of raw
-      YAML text. Evaluate `streamlit-pydantic` (or similar schema-driven form generation) before
-      hand-rolling a bespoke form per config file — the configs are already pydantic models
-      (`BudgetConfig` etc.), so a schema-driven renderer avoids 5 one-off forms. Keep
-      `write_config_file`'s whole-config re-validation as the backend safety net regardless of
-      what renders the input widgets.
+      YAML text. Now a Dash question, not a Streamlit one — evaluate schema-driven form generation
+      over the pydantic models (`BudgetConfig` etc.) before hand-rolling a bespoke form per config
+      file, since that avoids 5 one-off forms. Keep `write_config_file`'s whole-config
+      re-validation as the backend safety net regardless of what renders the input widgets.
 
 **Mart consistency** (surfaced by the Phase 7 stage 7 eval review):
 
@@ -87,6 +86,53 @@ Phase 6 demo):
       read them from `Settings.ollama` instead of dbt defaults).
 
 ## Done
+
+- [x] Phase 7 stage 8 — Dash frontend replacing Streamlit (Stage C of the agent plan).
+
+      **Streamlit could not express the chat page.** Its model is "re-run the script on every
+      interaction"; streaming an answer needs the server to push into a *live* page while a
+      callback is still running. Dash 4 does that with websocket callbacks + `set_props`, and
+      those require a FastAPI backend — which this project already had. Eight pages at parity,
+      plus Chat; `src/personal_finance/webapp/` and the `streamlit` dependency are gone.
+
+      Chat consumes `POST /agent` — the stage B AG-UI endpoint, unchanged — rather than a second
+      Dash-shaped endpoint, so a later React frontend needs no backend change. **Event shapes were
+      captured off the wire, not guessed**: text arrives as `delta` on `TEXT_MESSAGE_CONTENT`, but
+      a tool's name arrives as `toolCallName` on `TOOL_CALL_START` while its arguments arrive as a
+      separate `delta` on `TOOL_CALL_ARGS` — folding the latter into the answer, the obvious
+      mistake given the shared field name, splices raw JSON into the user's text. Verified live:
+      107 incremental pushes for one question, the tool surfaced within seconds ahead of any text,
+      answer matching the mart exactly.
+
+      **The palette is computed, not chosen** — three categorical slots clearing the CVD and
+      contrast floors in both light and dark, a sequential ramp for the sunburst (spend is a
+      magnitude, not an identity), a reserved status palette. Two bugs fell out of holding to
+      those rules: Plotly rejects 8-digit hex (which 500'd the Sankey page), and an invented
+      `STATUS["info"]` reused categorical blue — a series colour in a status slot, caught by the
+      test written for the rule.
+
+      **A pre-merge review found eleven more.** The worst were shapes this project keeps
+      re-encountering: the chat page read `settings.serving.api_url` directly, so
+      `pf dashboard --api-url` moved the seven data pages but *not* chat — which, with a second
+      `pf serve` running, would answer from a different warehouse than the charts on screen with
+      nothing saying so. An empty question returned `""`, wiping the answer while leaving the old
+      question and status up, so the page fabricated a failure the agent never had. `stream_answer`
+      caught only two httpx classes despite a docstring promising no exception escapes, so an
+      `InvalidURL` left "Thinking…" on screen forever. Overview shared one try/except across a
+      gold-backed and a silver-backed call, letting a merchants failure blank the totals that had
+      loaded fine. Two concurrent questions interleaved into one answer box, and navigating away
+      mid-stream let an abandoned run paint the remounted page — both now fenced on a per-mount
+      token. The Callouts page re-fetched the whole-ledger feed on every checkbox toggle (and twice
+      on load); it now fetches once into a `dcc.Store`. A validation warning on the review form
+      rebuilt the form and wiped the user's selections, worst exactly when retrying mattered.
+      Parity regressions restored: the top-N merchants slider, the sunburst table's `net_amount`
+      column, and the "See all callouts" link on an empty feed.
+      **And the test docstring claimed page-render coverage that did not exist** — the eight pages
+      were at 0%. `tests/test_dashboard_pages.py` now renders every page against recorded payloads.
+
+      `dash_table.DataTable` is deprecated in Dash 4, which surfaced as an error under this
+      project's warnings-as-errors policy. Switched to `dash-ag-grid`, Dash's own recommendation —
+      which also brings native sort/filter, wanted by the Phase 8 filters backlog anyway.
 
 - [x] Phase 7 stage 7 — `pf eval`: a pydantic-evals suite scoring the chat agent.
 

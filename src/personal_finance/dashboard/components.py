@@ -118,3 +118,27 @@ def graph(figure: Any, *, height: int = 420) -> dcc.Graph:
 
 def money(amount: float) -> str:
     return f"${amount:,.2f}"
+
+
+# Grid chrome, shared so the two tables look like one component. AG Grid
+# rather than dash_table: Dash 4 deprecates DataTable and points here, and
+# this project treats warnings as errors precisely so that kind of debt gets
+# dealt with rather than suppressed.
+GRID_CLASS = "ag-theme-alpine"
+GRID_STYLE = {"height": "26rem", "width": "100%"}
+GRID_DEFAULTS = {"sortable": True, "filter": True, "resizable": True, "flex": 1}
+
+
+def money_column(name: str, field: str) -> dict[str, Any]:
+    """A right-aligned currency column with tabular figures.
+
+    Tabular rather than proportional: these are columns that must align
+    vertically, which is the one case the figures rule carves out.
+    """
+    return {
+        "headerName": name,
+        "field": field,
+        "type": "numericColumn",
+        "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"},
+        "cellStyle": {"fontVariantNumeric": "tabular-nums"},
+    }

@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-07-29T18:26:11.334516Z"
+exclude-newer = "2026-07-29T18:50:52.945706Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -444,6 +444,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5a/67/d5cea6dedfbfde4165436fb58154480ea6358a9e71a739d3366575b5b724/dash-4.4.1.tar.gz", hash = "sha256:9356ca7856bc496c12c5b6de5978aaf783e090d07450ee395ade1c0c2cbdf816", size = 8536482, upload-time = "2026-07-21T18:58:19.72Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9a/29/498125538103a11eab9cfbbde41bacf93e14ab3ac92ae9fb4ac0ac4dd61b/dash-4.4.1-py3-none-any.whl", hash = "sha256:72120a91b10ee4d73f9446efd5d6a4ec218086feed7b1b479d2259844d1f658f", size = 8945027, upload-time = "2026-07-21T18:58:11.405Z" },
+]
+
+[[package]]
+name = "dash-ag-grid"
+version = "35.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dash" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/77/966331b34607378bb404fda988528b4fcb26f43169aa0e1548e76f0363b2/dash_ag_grid-35.3.0.tar.gz", hash = "sha256:012f7e7d5bff4862d1377ccb545ae2c80577e7909e118a88f1c408ff03a2403e", size = 6009070, upload-time = "2026-07-15T17:04:48.657Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/c8/c56a0278b1a6789f53c162313136ddba2fce175209bb958d7d43898f8355/dash_ag_grid-35.3.0-py3-none-any.whl", hash = "sha256:7cc0ca54fe8be4deab044d89975819f6e9ac66904c84310becbf68cdce74a4e9", size = 6051445, upload-time = "2026-07-15T17:04:46.364Z" },
 ]
 
 [[package]]
@@ -1674,6 +1686,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "dash" },
+    { name = "dash-ag-grid" },
     { name = "dash-bootstrap-components" },
     { name = "dbt-duckdb" },
     { name = "dlt", extra = ["parquet"] },
@@ -1708,6 +1721,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dash", specifier = ">=4.4.1" },
+    { name = "dash-ag-grid", specifier = ">=35.3.0" },
     { name = "dash-bootstrap-components", specifier = ">=2.0.4" },
     { name = "dbt-duckdb", specifier = ">=1.10.1" },
     { name = "dlt", extras = ["parquet"], specifier = ">=1.28.1" },

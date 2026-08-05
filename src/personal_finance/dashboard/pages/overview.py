@@ -32,6 +32,26 @@ def layout(**_kwargs: Any) -> html.Div:
             page_header("Overview", "Where the money went, and what changed."),
             html.Div(id="overview-callouts"),
             html.Div(id="overview-body"),
+            html.Hr(className="my-4"),
+            dbc.Row(
+                [
+                    dbc.Col(html.Label("Top merchants", className="small fw-semibold"), md="auto"),
+                    dbc.Col(
+                        dcc.Slider(
+                            id="overview-top-n",
+                            min=5,
+                            max=30,
+                            step=5,
+                            value=10,
+                            marks={n: str(n) for n in (5, 10, 20, 30)},
+                            tooltip={"placement": "bottom"},
+                        ),
+                        md=5,
+                    ),
+                ],
+                class_name="align-items-center g-3 mb-2",
+            ),
+            html.Div(id="overview-merchants"),
         ]
     )
 
@@ -48,11 +68,14 @@ def render_callouts(_trigger: str) -> Any:
         feed = get_optional("/callouts", limit=3)
     except ApiError as exc:
         return error_alert(exc)
-    if not feed or not feed.get("callouts"):
+    if feed is None:
         return None
+    # Linked whenever the feed came back at all, not only when it had
+    # something to say: an empty band and a broken endpoint look identical
+    # here, and the Callouts page is where the real error is visible.
     return html.Div(
         [
-            *[callout_card(callout) for callout in feed["callouts"]],
+            *[callout_card(callout) for callout in feed.get("callouts") or []],
             dcc.Link("See all callouts →", href="/callouts", className="small"),
         ],
         className="mb-4",
@@ -61,9 +84,12 @@ def render_callouts(_trigger: str) -> Any:
 
 @callback(Output("overview-body", "children"), Input("overview-body", "id"))
 def render_body(_trigger: str) -> Any:
+    # Merchants are fetched by a SEPARATE callback below. They come from
+    # silver while everything here comes from gold, so they fail
+    # independently — sharing one try/except would let a missing
+    # silver_merchants blank the tiles and the flow chart that had loaded fine.
     try:
         overview = get("/overview")
-        merchants = get("/merchants/top", limit=10)
     except ApiError as exc:
         return error_alert(exc)
 
@@ -109,6 +135,15 @@ def render_body(_trigger: str) -> Any:
     else:
         flow_block = empty_state("No monthly flow yet — run `pf transform` after ingesting data.")
 
+    return html.Div([tiles, flow_block])
+
+
+@callback(Output("overview-merchants", "children"), Input("overview-top-n", "value"))
+def render_merchants(top_n: int) -> Any:
+    try:
+        merchants = get("/merchants/top", limit=top_n)
+    except ApiError as exc:
+        return error_alert(exc)
     if merchants:
         ordered = sorted(merchants, key=lambda m: m["total_outflow"])
         bars = go.Figure(
@@ -128,8 +163,5 @@ def render_body(_trigger: str) -> Any:
                 yaxis={"title": {"text": ""}},
             )
         )
-        merchant_block = graph(bars, height=460)
-    else:
-        merchant_block = empty_state("No merchant activity yet — run `pf transform`.")
-
-    return html.Div([tiles, flow_block, html.Div(merchant_block, className="mt-4")])
+        return graph(bars, height=460)
+    return empty_state("No merchant activity yet — run `pf transform`.")

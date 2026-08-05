@@ -29,14 +29,20 @@ from typing import Any
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, dcc, html, set_props
+from dash.exceptions import PreventUpdate
 
-from personal_finance.config import get_settings
+from personal_finance.dashboard._client import api_url
 from personal_finance.dashboard.agent_stream import ChatTurn, stream_answer
 from personal_finance.dashboard.theme import ink
 
 dash.register_page(__name__, path="/chat", name="Chat", icon="bi-chat-dots", order=7)
 
 _INK = ink("light")
+
+# mount token -> the run currently allowed to paint that page. Module-level
+# because a websocket callback has nowhere else to keep per-page state, and
+# this app is single-user and local.
+_ACTIVE_RUN: dict[str, str] = {}
 
 SUGGESTIONS = (
     "How much did I spend on groceries last month?",
@@ -47,12 +53,27 @@ SUGGESTIONS = (
 
 
 def _agent_url() -> str:
-    return f"{get_settings().serving.api_url}/agent"
+    """Via `_client.api_url`, so `pf dashboard --api-url` moves the chat page too.
+
+    Reading `settings.serving.api_url` directly would leave chat pointed at
+    the default while the seven data pages followed the override — and if a
+    second `pf serve` happened to be running there, the answers would come
+    from a different warehouse than the charts on screen, with nothing
+    on the page saying so.
+    """
+    return f"{api_url()}/agent"
 
 
 def layout(**_kwargs: Any) -> html.Div:
     return html.Div(
         [
+            # Regenerated on every mount. A run that outlives its page —
+            # because the user navigated away and back — sees a token that no
+            # longer matches and stops pushing, instead of filling the fresh
+            # page with an abandoned answer. Dash only cancels websocket
+            # callbacks when the *connection* drops, and SPA navigation does
+            # not drop it.
+            dcc.Store(id="chat-mount", data=uuid.uuid4().hex),
             html.H1("Chat", className="h3 mb-1", style={"color": _INK["primary"]}),
             html.P(
                 "Answered only from your warehouse, through read-only tools.",
@@ -122,13 +143,17 @@ def use_suggestion(_clicks: list[int | None]) -> Any:
 
 @callback(
     Output("chat-answer", "children"),
+    Output("chat-ask", "disabled"),
     Input("chat-ask", "n_clicks"),
     Input("chat-input", "n_submit"),
     State("chat-input", "value"),
+    State("chat-mount", "data"),
     prevent_initial_call=True,
     websocket=True,
 )
-async def ask(_clicks: int | None, _submits: int | None, question: str | None) -> str:
+async def ask(
+    _clicks: int | None, _submits: int | None, question: str | None, mount: str
+) -> tuple[Any, bool]:
     """Stream one answer.
 
     ``websocket=True`` is what allows `set_props` to push mid-flight; over a
@@ -138,7 +163,21 @@ async def ask(_clicks: int | None, _submits: int | None, question: str | None) -
     """
     question = (question or "").strip()
     if not question:
-        return ""
+        # Not `return ""`: that clears the answer while leaving the previous
+        # question and status on screen, so the page reads as "the agent
+        # returned nothing for this" — a failure the agent never had.
+        raise PreventUpdate
+
+    # `_ACTIVE_MOUNT` fences two things at once. A second click while a run is
+    # in flight claims the slot, so the first run stops pushing instead of
+    # interleaving its text with the second's — Dash runs each websocket
+    # callback as its own task and does not serialise them. And a run whose
+    # page was unmounted sees a stale token and stops too.
+    run = uuid.uuid4().hex
+    _ACTIVE_RUN[mount] = run
+
+    def current() -> bool:
+        return _ACTIVE_RUN.get(mount) == run
 
     set_props("chat-question", {"children": question})
     set_props("chat-status", {"children": "Thinking…"})
@@ -149,19 +188,24 @@ async def ask(_clicks: int | None, _submits: int | None, question: str | None) -
         question,
         agent_url=_agent_url(),
         thread_id="dash",
-        run_id=uuid.uuid4().hex,
+        run_id=run,
     ):
+        if not current():
+            # Superseded. Leave the screen to whoever owns it now.
+            return dash.no_update, False
         set_props("chat-status", {"children": _status_line(turn)})
         if turn.text:
             set_props("chat-answer", {"children": turn.text})
 
+    if not current():
+        return dash.no_update, False
     set_props("chat-status", {"children": _status_line(turn)})
     if turn.error:
         # Rendered where the answer would be, not swallowed into the status
         # line: "the tool server is down" is the whole message, and it names
         # the command that fixes it.
-        return f"**The agent could not answer.**\n\n{turn.error}"
-    return turn.text or "_The agent returned no text._"
+        return f"**The agent could not answer.**\n\n{turn.error}", False
+    return turn.text or "_The agent returned no text._", False
 
 
 def _status_line(turn: ChatTurn) -> str:

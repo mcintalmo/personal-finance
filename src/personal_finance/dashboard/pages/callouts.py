@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import dash
-from dash import Input, Output, callback, dcc, html
+from dash import Input, Output, State, callback, dcc, html
 
 from personal_finance.dashboard._client import ApiError, get
 from personal_finance.dashboard.components import (
@@ -34,6 +34,12 @@ def layout(**_kwargs: Any) -> html.Div:
     return html.Div(
         [
             page_header("Callouts", "What moved, and what is about to."),
+            # The feed is computed over the whole ledger on demand — it is the
+            # endpoint the client raises its timeout to 30s for. Fetched once
+            # into this Store and filtered from memory thereafter; re-fetching
+            # per checkbox toggle made every chip click pay for a full
+            # recompute, and paid for two just to load the page.
+            dcc.Store(id="callouts-feed"),
             html.Div(id="callouts-filter"),
             html.Div(id="callouts-body"),
         ]
@@ -41,15 +47,16 @@ def layout(**_kwargs: Any) -> html.Div:
 
 
 @callback(
+    Output("callouts-feed", "data"),
     Output("callouts-filter", "children"),
     Output("callouts-body", "children"),
     Input("callouts-body", "id"),
 )
-def render(_trigger: str) -> tuple[Any, Any]:
+def render(_trigger: str) -> tuple[Any, Any, Any]:
     try:
         feed = get("/callouts")
     except ApiError as exc:
-        return None, error_alert(exc)
+        return None, None, error_alert(exc)
 
     callouts = feed.get("callouts") or []
     notes = []
@@ -71,7 +78,7 @@ def render(_trigger: str) -> tuple[Any, Any]:
                 else "No unusual months found. Trends and budget risk were not checked."
             )
         )
-        return None, html.Div(notes)
+        return feed, None, html.Div(notes)
 
     kinds = [kind for kind in KIND_LABELS if any(c["kind"] == kind for c in callouts)]
     controls = dcc.Checklist(
@@ -82,19 +89,17 @@ def render(_trigger: str) -> tuple[Any, Any]:
         className="mb-3",
         labelStyle={"marginRight": "1.5rem"},
     )
-    return controls, html.Div([*notes, html.Div(id="callouts-list")])
+    return feed, controls, html.Div([*notes, html.Div(id="callouts-list")])
 
 
 @callback(
     Output("callouts-list", "children"),
     Input("callouts-kinds", "value"),
+    State("callouts-feed", "data"),
 )
-def filter_callouts(chosen: list[str] | None) -> Any:
-    try:
-        feed = get("/callouts")
-    except ApiError as exc:
-        return error_alert(exc)
-    shown = [c for c in (feed.get("callouts") or []) if c["kind"] in (chosen or [])]
+def filter_callouts(chosen: list[str] | None, feed: dict[str, Any] | None) -> Any:
+    """Filters the already-fetched feed. No second request."""
+    shown = [c for c in ((feed or {}).get("callouts") or []) if c["kind"] in (chosen or [])]
     if not shown:
         return html.Div("No callouts of the selected kinds.", className="small text-muted")
     return html.Div([callout_card(callout) for callout in shown])

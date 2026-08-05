@@ -39,7 +39,7 @@
 
 ## 6. Serving & visualization
 - [ ] FastAPI API layer over gold marts
-- [ ] Streamlit app shell: overview dashboard (net flow, spend over time, top movers)
+- [ ] Dash app shell: overview dashboard (net flow, spend over time, top movers)
 - [ ] Sunburst drill-down of the category hierarchy
 - [ ] Sankey of money flow (income → accounts → category subtrees)
 - [ ] Budget buckets: define in YAML/UI, budget vs. actual views

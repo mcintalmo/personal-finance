@@ -5,14 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 import dash
+import dash_ag_grid as dag
 import plotly.graph_objects as go
-from dash import Input, Output, callback, dash_table, dcc, html
+from dash import Input, Output, callback, dcc, html
 
 from personal_finance.dashboard._client import ApiError, get
 from personal_finance.dashboard.components import (
+    GRID_CLASS,
+    GRID_DEFAULTS,
+    GRID_STYLE,
     empty_state,
     error_alert,
     graph,
+    money_column,
     page_header,
 )
 from personal_finance.dashboard.theme import SEQUENTIAL_BLUE, figure_layout, ink
@@ -79,45 +84,19 @@ def render(metric: str) -> Any:
     # The table is not decoration: three light-mode slots sit below 3:1 on the
     # light surface, and the palette's relief rule requires a readable
     # alternative wherever colour alone might not carry.
-    table = dash_table.DataTable(
-        data=sorted(rollups, key=lambda r: r["total_outflow"], reverse=True),
-        columns=[
-            {"name": "Path", "id": "path"},
-            {"name": "Depth", "id": "depth"},
-            {"name": "Transactions", "id": "transaction_count"},
-            {
-                "name": "Outflow",
-                "id": "total_outflow",
-                "type": "numeric",
-                "format": {"specifier": "$,.2f"},
-            },
-            {
-                "name": "Inflow",
-                "id": "total_inflow",
-                "type": "numeric",
-                "format": {"specifier": "$,.2f"},
-            },
+    table = dag.AgGrid(
+        rowData=sorted(rollups, key=lambda r: r["total_outflow"], reverse=True),
+        columnDefs=[
+            {"headerName": "Path", "field": "path", "flex": 2},
+            {"headerName": "Depth", "field": "depth", "type": "numericColumn"},
+            {"headerName": "Transactions", "field": "transaction_count", "type": "numericColumn"},
+            money_column("Outflow", "total_outflow"),
+            money_column("Inflow", "total_inflow"),
+            money_column("Net", "net_amount"),
         ],
-        page_size=15,
-        sort_action="native",
-        style_as_list_view=True,
-        style_cell={"fontFamily": "system-ui, sans-serif", "fontSize": 13, "border": "none"},
-        style_data={"borderBottom": f"1px solid {_INK['grid']}"},
-        style_header={
-            "backgroundColor": _INK["surface"],
-            "color": _INK["muted"],
-            "border": "none",
-            "textTransform": "uppercase",
-            "fontSize": 11,
-        },
-        # Tabular figures: these are columns that must align vertically.
-        style_cell_conditional=[
-            {
-                "if": {"column_id": c},
-                "textAlign": "right",
-                "fontVariantNumeric": "tabular-nums",
-            }
-            for c in ("transaction_count", "total_outflow", "total_inflow", "depth")
-        ],
+        defaultColDef=GRID_DEFAULTS,
+        className=GRID_CLASS,
+        style=GRID_STYLE,
+        dashGridOptions={"pagination": True, "paginationPageSize": 15},
     )
     return html.Div([graph(figure, height=620), html.Div(table, className="mt-4")])

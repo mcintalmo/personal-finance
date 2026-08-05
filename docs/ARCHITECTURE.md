@@ -53,7 +53,7 @@ flowchart LR
 
     subgraph serving [Serving]
         api[FastAPI<br/>API layer]
-        ui[Streamlit UI<br/>Plotly: sunburst, Sankey]
+        ui[Dash UI<br/>Plotly: sunburst, Sankey, chat]
         chat[NL chat agent<br/>Ollama tool-calling<br/>over gold marts]
     end
 
@@ -92,7 +92,7 @@ phase — its software-defined assets map 1:1 onto dlt sources and dbt models.
 | Transfer detection | **Deterministic heuristics** (dbt model) | Amount negation + date window + account pair. No ML needed; fully testable. |
 | Orchestration | **CLI first, Dagster later** | Dagster's asset graph = the lineage graph; far lighter than Airflow in Docker. Deferred until automation phase to avoid early ceremony. |
 | API layer | **FastAPI + Pydantic** | Decouples warehouse from any UI; matches repo conventions. |
-| UI | **Streamlit + Plotly** first; React upgrade path via the API | Sunburst & Sankey are first-class Plotly charts; sunburst is the natural rendering of the hierarchical taxonomy. UI is swappable because gold marts + FastAPI are the contract. |
+| UI | **Dash + Plotly**; React upgrade path via the API and AG-UI | Sunburst & Sankey are first-class Plotly charts; sunburst is the natural rendering of the hierarchical taxonomy. UI is swappable because gold marts + FastAPI are the contract. |
 | BI (optional) | **Apache Superset** (dockerized, phase 8) | Optional "power analyst" service over the same gold layer. Not the primary UI: heavyweight (metadata DB, Redis, auth) and can't compose with chat/review-queue interactions. |
 | NL chat | **Ollama tool-calling agent** over governed gold-mart queries | Tools are curated queries/metrics, not open text-to-SQL against the whole DB — safer and more reliable. |
 | Forecasting | **statsforecast** (Nixtla) | Fast, local, CPU-only. Recurring detection is heuristic (dbt model), not ML. |

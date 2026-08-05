@@ -22,6 +22,7 @@ recorded frames without a browser or a running agent.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,8 @@ import httpx
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
+
+logger = logging.getLogger(__name__)
 
 _DATA_PREFIX = "data: "
 
@@ -165,6 +168,17 @@ async def stream_answer(
         yield turn
     except httpx.TransportError as exc:
         turn.error = f"Can't reach the agent at {agent_url} — is `pf serve` running? ({exc})"
+        turn.finished = True
+        yield turn
+    except Exception as exc:
+        # Deliberately broad, and load-bearing. The caller is a UI callback
+        # with no error path of its own: anything escaping here leaves the
+        # page reading "Thinking…" forever with no message anywhere, which is
+        # the exact silent failure this module claims to have designed out.
+        # httpx.InvalidURL from a malformed api_url is not a TransportError,
+        # so the two narrow clauses above genuinely do not cover it.
+        logger.warning("Agent stream failed", exc_info=True)
+        turn.error = f"The agent stream failed: {type(exc).__name__}: {exc}"
         turn.finished = True
         yield turn
 

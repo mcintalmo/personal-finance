@@ -77,7 +77,9 @@ def load(name: str | None) -> str:
     State("config-content", "value"),
     prevent_initial_call=True,
 )
-def save(_clicks: int, name: str, content: str) -> Any:
+def save(_clicks: int, name: str | None, content: str) -> Any:
+    if not name:
+        return dbc.Alert("Pick a config file first.", color="warning")
     try:
         put(f"/config/{name}", {"name": name, "content": content})
     except ApiError as exc:
